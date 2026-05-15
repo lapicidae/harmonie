@@ -17,10 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install dependencies first for better Docker layer caching.
+# Install dependencies first so the layer cache survives source changes.
 COPY pyproject.toml README.md ./
 COPY harmonie ./harmonie
-RUN pip install --upgrade pip && pip install .
+
+# --pre is required because essentia-tensorflow is published with a .dev tag
+# (e.g. 2.1b6.devNNNN). pip skips pre-releases without it.
+RUN pip install --upgrade pip \
+    && pip install --pre .
 
 VOLUME ["/data", "/music"]
 EXPOSE 8842

@@ -8,9 +8,26 @@ The intended deployment is a long-running container that periodically rescans th
 
 ## Quick start (Docker)
 
+Pre-built multi-arch images (`linux/amd64` + `linux/arm64`) are published to GitHub Container Registry on every push to `main` and on each version tag:
+
+```bash
+docker pull ghcr.io/mxschll/harmonie:latest
+```
+
+Available tags:
+
+| Tag                  | What it tracks                 |
+| -------------------- | ------------------------------ |
+| `latest`             | Latest commit on `main`        |
+| `main`               | Same as `latest`               |
+| `vX.Y.Z` / `X.Y` / `X` | Released versions (git tags) |
+| `sha-<short>`        | A specific commit              |
+
+To run with `docker compose`, copy the example config and point it at your library:
+
 ```bash
 cp .env.example .env
-# Edit .env: set HARMONIE_LIBRARIES (in the container) and edit
+# Edit .env: set HARMONIE_LIBRARIES (path inside the container) and edit
 # docker-compose.yml to mount your library at that path.
 
 docker compose up -d
@@ -161,7 +178,16 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The non-Essentia parts (DB, similarity, playlist, scan) are covered by the `tests/` suite. Essentia itself is exercised by running an actual scan.
+The non-Essentia parts (DB, similarity, playlist, scan, tags) are covered by the `tests/` suite. Essentia itself is exercised by running an actual scan.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+* `pytest` against Python 3.9 and 3.11.
+* `docker buildx` of the production image for `linux/amd64` and `linux/arm64`.
+* On pushes to `main` or version tags (`vX.Y.Z`), the image is published to `ghcr.io/mxschll/harmonie` with `latest`, `sha-<short>`, and semver tags.
+* On pull requests the image is built but not pushed — Dockerfile changes are validated without touching the registry.
 
 ## Layout
 
