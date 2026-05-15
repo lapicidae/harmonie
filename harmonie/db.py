@@ -78,6 +78,9 @@ CREATE INDEX IF NOT EXISTS idx_tracks_dance       ON tracks(danceability);
 CREATE INDEX IF NOT EXISTS idx_tracks_loud        ON tracks(loudness_db);
 CREATE INDEX IF NOT EXISTS idx_tracks_descv       ON tracks(descriptor_version);
 CREATE INDEX IF NOT EXISTS idx_tracks_lib         ON tracks(library_root);
+-- Composite NOCASE index for the /tracks/lookup endpoint's tag triple.
+CREATE INDEX IF NOT EXISTS idx_tracks_artist_album_title
+    ON tracks(artist COLLATE NOCASE, album COLLATE NOCASE, title COLLATE NOCASE);
 """
 
 
@@ -432,6 +435,74 @@ class Database:
         cur = self._conn.execute("SELECT * FROM tracks WHERE path = ?", (path,))
         row = cur.fetchone()
         return _row_to_dict(row) if row else None
+
+    def find_track(
+        self,
+        *,
+        path: Optional[str] = None,
+        artist: Optional[str] = None,
+        album: Optional[str] = None,
+        title: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Best-effort lookup of a single track by path and/or tags.
+
+        Strategies are tried in order; the first hit wins. Returns the row
+        with the smallest ``id`` if multiple match (deterministic).
+
+        1. Exact match on ``path``.
+        2. Exact match on ``relative_path`` — useful when the caller's mount
+           point differs from harmonie's view of the same library.
+        3. Case-insensitive match on the (artist, album, title) triple.
+        4. Case-insensitive match on (title, artist) or (title, album) when
+           one tag is missing.
+
+        Returns ``None`` if no strategy matches.
+        """
+        if path:
+            row = self.get_track_by_path(path)
+            if row is not None:
+                return row
+            cur = self._conn.execute(
+                "SELECT * FROM tracks WHERE relative_path = ? "
+                "ORDER BY id LIMIT 1",
+                (path,),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                return _row_to_dict(row)
+
+        if artist and album and title:
+            cur = self._conn.execute(
+                "SELECT * FROM tracks "
+                "WHERE artist = ? COLLATE NOCASE "
+                "  AND album = ? COLLATE NOCASE "
+                "  AND title = ? COLLATE NOCASE "
+                "ORDER BY id LIMIT 1",
+                (artist, album, title),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                return _row_to_dict(row)
+
+        if title and (artist or album):
+            clauses = ["title = ? COLLATE NOCASE"]
+            params: list = [title]
+            if artist:
+                clauses.append("artist = ? COLLATE NOCASE")
+                params.append(artist)
+            if album:
+                clauses.append("album = ? COLLATE NOCASE")
+                params.append(album)
+            cur = self._conn.execute(
+                f"SELECT * FROM tracks WHERE {' AND '.join(clauses)} "
+                "ORDER BY id LIMIT 1",
+                tuple(params),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                return _row_to_dict(row)
+
+        return None
 
     def get_tracks_by_ids(self, ids: list[int]) -> dict[int, dict]:
         """Return ``{id: row}`` for the given IDs, in one query.

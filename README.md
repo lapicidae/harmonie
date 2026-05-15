@@ -75,6 +75,7 @@ All endpoints are versioned under `/api/v1/`. If `HARMONIE_API_KEY` is set, ever
 | `GET`  | `/api/v1/tracks` | List tracks (filters + pagination) |
 | `GET`  | `/api/v1/tracks/{id}` | Full track record |
 | `GET`  | `/api/v1/tracks/{id}/similar` | Top-N similar tracks |
+| `POST` | `/api/v1/tracks/lookup` | Find a single track by `path` and/or tags |
 | `POST` | `/api/v1/playlists/similar` | N-track playlist from seeds, with BPM/key constraints |
 | `POST` | `/api/v1/playlists/chained` | Walk top-N similar in chunks, re-anchoring on the last track each chunk |
 | `POST` | `/api/v1/playlists/vibe` | N-track playlist from descriptor targets |
@@ -89,6 +90,22 @@ Every track and every match in API responses includes the metadata you need to l
 * **`library_root` + `relative_path`** — the path-based match. If the consumer sees the same library layout under a different mount point, it joins on `relative_path` directly. No path-prefix mapping config needed in the common case.
 
 `library_root` reflects the configured `HARMONIE_LIBRARIES` entries at scan time. If you reconfigure mount points, re-scan to refresh.
+
+The `POST /api/v1/tracks/lookup` endpoint exposes this matching directly. Send any subset of `{path, artist, album, title}` and get back a single track:
+
+```bash
+# By tags (case-insensitive).
+curl -X POST http://localhost:8842/api/v1/tracks/lookup \
+  -H 'content-type: application/json' \
+  -d '{"artist": "Aphex Twin", "album": "SAW", "title": "Xtal"}'
+
+# By path (works against the absolute path or the relative_path).
+curl -X POST http://localhost:8842/api/v1/tracks/lookup \
+  -H 'content-type: application/json' \
+  -d '{"path": "Aphex Twin/SAW/01 Xtal.flac"}'
+```
+
+The lookup tries strategies in order — exact path, relative path, full tag triple, looser tag pair — and returns the first match (smallest id wins on ties). 404 if nothing matches; 400 if you send an empty body.
 
 ### Filter parameters
 

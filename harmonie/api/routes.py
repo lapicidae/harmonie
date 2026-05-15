@@ -35,6 +35,7 @@ from .schemas import (
     SimilarResult,
     Track,
     TrackList,
+    TrackLookupBody,
     TrackSummary,
     VibePlaylistBody,
 )
@@ -213,6 +214,32 @@ def list_tracks(
         limit=limit,
         offset=offset,
     )
+
+
+@api_router.post("/tracks/lookup", response_model=Track)
+def lookup_track(
+    body: TrackLookupBody, db: Database = Depends(get_db)
+) -> Track:
+    """Find a single track by path and/or tags.
+
+    Useful for external clients (e.g. media-server plugins) that want to
+    map a track from their own catalog onto a harmonie track without doing
+    a filesystem walk. See :class:`TrackLookupBody` for matching strategy.
+    """
+    if not (body.path or body.artist or body.album or body.title):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "at least one of path, artist, album, title must be provided",
+        )
+    row = db.find_track(
+        path=body.path,
+        artist=body.artist,
+        album=body.album,
+        title=body.title,
+    )
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no matching track")
+    return Track(**row)
 
 
 @api_router.get("/tracks/{track_id}", response_model=Track)

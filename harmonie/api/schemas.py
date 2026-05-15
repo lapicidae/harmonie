@@ -123,6 +123,17 @@ class ChainedPlaylistBody(BaseModel):
     filter: Optional[FilterParams] = None
 
 
+class TrackLookupBody(BaseModel):
+    """Body for POST /tracks/lookup. All fields optional, but at least one
+    must be provided. The handler tries path → relative_path → tag triple →
+    looser tag pair, returning the first match (smallest id wins on ties)."""
+
+    path: Optional[str] = None
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    title: Optional[str] = None
+
+
 class PlaylistResult(BaseModel):
     items: list[MatchOut]
 

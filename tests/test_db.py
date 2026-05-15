@@ -278,3 +278,151 @@ def test_descriptor_refresh_updates_tags(
         assert row["bpm"] == 140
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# find_track (used by POST /tracks/lookup)
+# ---------------------------------------------------------------------------
+
+
+def _add_track(db, path, *, library_root=None, relative_path=None,
+               artist=None, album=None, title=None, embedding=None):
+    from harmonie.tags import Tags
+
+    return db.upsert_track(
+        path=path,
+        size=1,
+        mtime=1.0,
+        duration=1.0,
+        embedding=embedding if embedding is not None else
+                  np.zeros(4, dtype=np.float32),
+        model="m1",
+        descriptors=__import__(
+            "harmonie.features", fromlist=["Descriptors"]
+        ).Descriptors(),
+        descriptor_version=DESCRIPTOR_VERSION,
+        tags=Tags(artist=artist, album=album, title=title),
+        library_root=library_root,
+        relative_path=relative_path,
+    )
+
+
+def test_find_track_by_exact_path(tmp_db_path):
+    db = Database(tmp_db_path)
+    try:
+        _add_track(db, "/lib/a.flac", library_root="/lib", relative_path="a.flac")
+        row = db.find_track(path="/lib/a.flac")
+        assert row is not None and row["path"] == "/lib/a.flac"
+    finally:
+        db.close()
+
+
+def test_find_track_by_relative_path(tmp_db_path):
+    """The caller may have a different mount point. If the path they send
+    matches the harmonie-side relative_path, we still find the track."""
+    db = Database(tmp_db_path)
+    try:
+        _add_track(
+            db, "/srv/music/artist/song.flac",
+            library_root="/srv/music",
+            relative_path="artist/song.flac",
+        )
+        row = db.find_track(path="artist/song.flac")
+        assert row is not None
+        assert row["relative_path"] == "artist/song.flac"
+    finally:
+        db.close()
+
+
+def test_find_track_by_tag_triple(tmp_db_path):
+    db = Database(tmp_db_path)
+    try:
+        _add_track(db, "/a.flac", artist="Aphex Twin", album="SAW", title="Xtal")
+        _add_track(db, "/b.flac", artist="Other", album="Other", title="Other")
+        row = db.find_track(artist="Aphex Twin", album="SAW", title="Xtal")
+        assert row is not None
+        assert row["path"] == "/a.flac"
+    finally:
+        db.close()
+
+
+def test_find_track_tag_match_is_case_insensitive(tmp_db_path):
+    db = Database(tmp_db_path)
+    try:
+        _add_track(db, "/a.flac", artist="Aphex Twin", album="SAW", title="Xtal")
+        row = db.find_track(artist="aphex twin", album="saw", title="xtal")
+        assert row is not None
+        assert row["path"] == "/a.flac"
+    finally:
+        db.close()
+
+
+def test_find_track_pair_fallback(tmp_db_path):
+    """If only artist+title (no album) is given, we still match."""
+    db = Database(tmp_db_path)
+    try:
+        _add_track(db, "/a.flac", artist="Aphex Twin", album="SAW", title="Xtal")
+        row = db.find_track(artist="Aphex Twin", title="Xtal")
+        assert row is not None
+        assert row["path"] == "/a.flac"
+    finally:
+        db.close()
+
+
+def test_find_track_path_takes_precedence_over_tags(tmp_db_path):
+    """Path match is most specific. If the caller provides both, the path
+    hit wins even if the tags would match a different row."""
+    db = Database(tmp_db_path)
+    try:
+        a = _add_track(
+            db, "/by-path.flac",
+            artist="DifferentArtist", album="X", title="Y",
+        )
+        _add_track(db, "/by-tags.flac", artist="A", album="B", title="C")
+        row = db.find_track(
+            path="/by-path.flac",
+            artist="A", album="B", title="C",
+        )
+        assert row is not None
+        assert row["id"] == a
+    finally:
+        db.close()
+
+
+def test_find_track_deterministic_on_duplicates(tmp_db_path):
+    """When multiple tracks have identical tags, the one with the smallest
+    id wins, every time."""
+    db = Database(tmp_db_path)
+    try:
+        first = _add_track(db, "/a.flac", artist="A", album="B", title="C")
+        _add_track(db, "/b.flac", artist="A", album="B", title="C")
+        _add_track(db, "/c.flac", artist="A", album="B", title="C")
+        for _ in range(3):
+            row = db.find_track(artist="A", album="B", title="C")
+            assert row["id"] == first
+    finally:
+        db.close()
+
+
+def test_find_track_returns_none_on_no_match(tmp_db_path):
+    db = Database(tmp_db_path)
+    try:
+        _add_track(db, "/a.flac", artist="A", album="B", title="C")
+        assert db.find_track(path="/nope.flac") is None
+        assert db.find_track(artist="X", album="Y", title="Z") is None
+        assert db.find_track() is None
+    finally:
+        db.close()
+
+
+def test_find_track_partial_tags_too_loose(tmp_db_path):
+    """Title alone isn't enough — too ambiguous. We require title plus at
+    least one of artist/album to fall back to the pair match."""
+    db = Database(tmp_db_path)
+    try:
+        _add_track(db, "/a.flac", title="Common Title")
+        _add_track(db, "/b.flac", title="Common Title")
+        # Just title → no match (intentionally — no anchor field).
+        assert db.find_track(title="Common Title") is None
+    finally:
+        db.close()
