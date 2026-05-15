@@ -18,12 +18,13 @@ docker pull ghcr.io/mxschll/harmonie:latest
 
 Available tags:
 
-| Tag                  | What it tracks                 |
-| -------------------- | ------------------------------ |
-| `latest`             | Latest commit on `main`        |
-| `main`               | Same as `latest`               |
-| `vX.Y.Z` / `X.Y` / `X` | Released versions (git tags) |
-| `sha-<short>`        | A specific commit              |
+| Tag                    | What it tracks                                |
+| ---------------------- | --------------------------------------------- |
+| `latest`               | Latest commit on `main`                       |
+| `main`                 | Same as `latest`                              |
+| `0.1.<n>`              | Auto-versioned per push to `main` (`n` = workflow run number) |
+| `sha-<short>`          | A specific commit                             |
+| `vX.Y.Z` / `X.Y` / `X` | Manually-tagged release (`git tag vX.Y.Z`)    |
 
 To run with `docker compose`, copy the example config and point it at your library:
 
@@ -187,7 +188,8 @@ The non-Essentia parts (DB, similarity, playlist, scan, tags) are covered by the
 
 * `pytest` against Python 3.9 and 3.11.
 * `docker buildx` of the production image for `linux/amd64`.
-* On pushes to `main` or version tags (`vX.Y.Z`), the image is published to `ghcr.io/mxschll/harmonie` with `latest`, `sha-<short>`, and semver tags.
+* On every push to `main` the image is published to `ghcr.io/mxschll/harmonie` with `latest`, `main`, `sha-<short>`, and an auto-incrementing `0.1.<n>` version tag (where `n` is the workflow run number — no manual tagging required).
+* On pushes of a version tag (`git tag vX.Y.Z`), the image picks up `X.Y.Z`, `X.Y`, and `X` tags as well.
 * On pull requests the image is built but not pushed — Dockerfile changes are validated without touching the registry.
 
 ## Layout

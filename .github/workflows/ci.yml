@@ -15,6 +15,12 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Opt every JS action into Node 24 ahead of the June 2026 deadline.
+  # Silences the deprecation warning for actions still published on Node 20
+  # (docker/login-action, setup-buildx-action, metadata-action, etc.).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   # ---------------------------------------------------------------------
   # Tests
@@ -29,7 +35,7 @@ jobs:
         # Dockerfile. Two versions cover the surface without bloating CI.
         python-version: ['3.9', '3.11']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -64,7 +70,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -82,6 +88,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          # Tag scheme:
+          #   * latest                  — default-branch pushes only
+          #   * main / pr-<n>           — branch / PR refs
+          #   * sha-<short>             — always
+          #   * 0.1.<run_number>        — auto-version per main push
+          #   * <X.Y.Z> / <X.Y> / <X>   — when a vX.Y.Z git tag is pushed
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -90,9 +102,10 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=0.1.${{ github.run_number }},enable={{is_default_branch}}
 
       - name: Build${{ github.event_name == 'pull_request' && '' || ' and push' }}
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
