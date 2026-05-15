@@ -8,11 +8,13 @@ The intended deployment is a long-running container that periodically rescans th
 
 ## Quick start (Docker)
 
-Pre-built multi-arch images (`linux/amd64` + `linux/arm64`) are published to GitHub Container Registry on every push to `main` and on each version tag:
+A `linux/amd64` image is published to GitHub Container Registry on every push to `main` and on each version tag:
 
 ```bash
 docker pull ghcr.io/mxschll/harmonie:latest
 ```
+
+> The image is amd64-only because Essentia ships only manylinux x86_64 wheels on PyPI. Apple Silicon and other arm64 hosts run the image transparently via Docker's emulation layer; Pi-class arm64 hosts that can't tolerate emulation can install directly with `pip` (see the local-Python instructions below).
 
 Available tags:
 
@@ -184,7 +186,7 @@ The non-Essentia parts (DB, similarity, playlist, scan, tags) are covered by the
 `.github/workflows/ci.yml` runs on every push and pull request:
 
 * `pytest` against Python 3.9 and 3.11.
-* `docker buildx` of the production image for `linux/amd64` and `linux/arm64`.
+* `docker buildx` of the production image for `linux/amd64`.
 * On pushes to `main` or version tags (`vX.Y.Z`), the image is published to `ghcr.io/mxschll/harmonie` with `latest`, `sha-<short>`, and semver tags.
 * On pull requests the image is built but not pushed — Dockerfile changes are validated without touching the registry.
 

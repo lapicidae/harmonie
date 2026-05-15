@@ -49,6 +49,12 @@ jobs:
 
   # ---------------------------------------------------------------------
   # Docker build (always) + push (main / tags only)
+  #
+  # Built for linux/amd64 only. Essentia (and essentia-tensorflow) publish
+  # only manylinux_2_17_x86_64 wheels on PyPI — no linux/aarch64 wheel
+  # exists, so a multi-arch build would fail on the arm64 leg. Apple
+  # Silicon and other arm64 hosts run the amd64 image via Rosetta /
+  # qemu-user, which Docker handles transparently.
   # ---------------------------------------------------------------------
   docker:
     name: docker (build${{ github.event_name == 'pull_request' && '' || ' & push' }})
@@ -59,10 +65,6 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        # Required to cross-build linux/arm64 on amd64 runners.
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -93,7 +95,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           # Push only when this is a real merge to main or a tag — never on PRs.
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
