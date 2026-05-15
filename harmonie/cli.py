@@ -62,6 +62,54 @@ def _open_resources():
 # ---------------------------------------------------------------------------
 
 
+def cmd_migrate(args: argparse.Namespace) -> int:
+    """Apply pending schema migrations and exit. Useful as a separate
+    deploy step before bringing up `serve` or `scan`."""
+    settings = get_settings()
+    configure_logging(settings)
+    import sqlite3
+
+    from .db import Database
+    from .migrations import (
+        CURRENT_SCHEMA_VERSION,
+        MigrationError,
+        get_schema_version,
+    )
+
+    # Ensure the data directory exists before we touch SQLite — sqlite3
+    # won't create it for us, but Database() would.
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    pre_conn = sqlite3.connect(settings.db_path)
+    try:
+        before = get_schema_version(pre_conn)
+    finally:
+        pre_conn.close()
+
+    try:
+        db = Database(settings.db_path)
+    except MigrationError as e:
+        print(f"migrate: {e}", file=sys.stderr)
+        return 1
+    try:
+        after = get_schema_version(db._conn)
+    finally:
+        db.close()
+
+    if before == after:
+        print(f"Already at schema version {after}. Nothing to do.")
+    else:
+        print(f"Migrated database from version {before} to {after}.")
+    if after != CURRENT_SCHEMA_VERSION:  # pragma: no cover - defensive
+        print(
+            f"Warning: latest known version is {CURRENT_SCHEMA_VERSION}, "
+            f"DB ended up at {after}.",
+            file=sys.stderr,
+        )
+        return 2
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """Run the FastAPI service via uvicorn."""
     import uvicorn
@@ -298,6 +346,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     psv = sub.add_parser("serve", help="Run the HTTP service.")
     psv.set_defaults(func=cmd_serve)
+
+    pmig = sub.add_parser(
+        "migrate",
+        help="Apply any pending DB schema migrations and exit.",
+    )
+    pmig.set_defaults(func=cmd_migrate)
 
     psc = sub.add_parser("scan", help="Run one analysis pass and exit.")
     psc.add_argument("--force", action="store_true", help="Re-extract everything.")

@@ -28,60 +28,12 @@ from typing import Any, Iterator, Optional
 import numpy as np
 
 from .features import Descriptors
+from .migrations import run_migrations
 from .tags import Tags
 
-SCHEMA_VERSION = 1
 
-
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS meta (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS tracks (
-    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-    path                  TEXT    UNIQUE NOT NULL,
-    -- Library-aware addressing for clients that mount paths differently.
-    library_root          TEXT,
-    relative_path         TEXT,
-    size                  INTEGER NOT NULL,
-    mtime                 REAL    NOT NULL,
-    duration              REAL    NOT NULL,
-    embedding             BLOB    NOT NULL,
-    embedding_dim         INTEGER NOT NULL,
-    model                 TEXT    NOT NULL,
-    -- Versioning so a descriptor algo bump doesn't force re-running TF.
-    descriptor_version    INTEGER NOT NULL,
-    -- Musical descriptors. NULL = algorithm couldn't extract.
-    bpm                   REAL,
-    bpm_confidence        REAL,
-    key                   TEXT,
-    scale                 TEXT,
-    key_strength          REAL,
-    loudness_db           REAL,
-    danceability          REAL,
-    onset_rate            REAL,
-    -- Tags from the file itself (mutagen). Used by external clients to
-    -- match harmonie tracks back to their own catalog without filesystem walks.
-    artist                TEXT,
-    album                 TEXT,
-    title                 TEXT,
-    track_number          INTEGER,
-    analyzed_at           REAL    NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_tracks_model       ON tracks(model);
-CREATE INDEX IF NOT EXISTS idx_tracks_bpm         ON tracks(bpm);
-CREATE INDEX IF NOT EXISTS idx_tracks_key_scale   ON tracks(key, scale);
-CREATE INDEX IF NOT EXISTS idx_tracks_dance       ON tracks(danceability);
-CREATE INDEX IF NOT EXISTS idx_tracks_loud        ON tracks(loudness_db);
-CREATE INDEX IF NOT EXISTS idx_tracks_descv       ON tracks(descriptor_version);
-CREATE INDEX IF NOT EXISTS idx_tracks_lib         ON tracks(library_root);
--- Composite NOCASE index for the /tracks/lookup endpoint's tag triple.
-CREATE INDEX IF NOT EXISTS idx_tracks_artist_album_title
-    ON tracks(artist COLLATE NOCASE, album COLLATE NOCASE, title COLLATE NOCASE);
-"""
+# Schema lives in :mod:`harmonie.migrations` — see migrations.py for the
+# canonical definition and the rules for adding a new migration.
 
 
 # ---------------------------------------------------------------------------
@@ -196,22 +148,7 @@ class Database:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._init_schema()
-
-    # -- schema --------------------------------------------------------
-
-    def _init_schema(self) -> None:
-        # All DDL is idempotent; safe to run on every open. The meta row
-        # records the schema version so that, when the service ships and we
-        # need a real migration story, this is the hook point. Until then
-        # we don't ship breaking changes — schema edits during development
-        # are accompanied by deleting the local DB file.
-        self._conn.executescript(SCHEMA_SQL)
-        self._conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
-            (str(SCHEMA_VERSION),),
-        )
-        self._conn.commit()
+        run_migrations(self._conn)
 
     # -- lifecycle -----------------------------------------------------
 

@@ -199,6 +199,27 @@ pytest
 
 The non-Essentia parts (DB, similarity, playlist, scan, tags) are covered by the `tests/` suite. Essentia itself is exercised by running an actual scan.
 
+## Schema migrations
+
+The schema lives in `harmonie/migrations.py` as an append-only list of versioned migration functions. The runner is invoked automatically when the DB is opened (so `harmonie scan`, `harmonie serve`, and any test that constructs a `Database` always sees an up-to-date schema), and is also exposed as a one-shot CLI for ops:
+
+```bash
+harmonie migrate
+# Migrated database from version 0 to 1.
+harmonie migrate
+# Already at schema version 1. Nothing to do.
+```
+
+Each migration runs in its own transaction. A failure mid-migration rolls back to the previous version and leaves the DB usable. The runner refuses to operate on a DB that has been migrated past the latest version known to this binary — it would risk silent data loss.
+
+To add a migration:
+
+1. Add a `_migration_NNN_what_it_does(conn)` function to `harmonie/migrations.py`.
+2. Append it to the `MIGRATIONS` list in the same file.
+3. Update any code in `db.py` that depends on the new shape — column lists in `upsert_track`, `list_tracks`, `get_tracks_by_ids`, etc.
+
+Migration functions must use `conn.execute(...)` for each statement individually rather than `conn.executescript(...)`, because the latter issues its own commit and breaks the surrounding transaction.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push and pull request:
@@ -221,6 +242,7 @@ harmonie/
 │   ├── db.py          # SQLite layer
 │   ├── features.py    # Essentia extraction
 │   ├── index.py       # in-memory L2-normalised embedding cache
+│   ├── migrations.py  # versioned schema migrations
 │   ├── playlist.py    # similar / chained / vibe playlists, Camelot wheel
 │   ├── scan.py        # filesystem walker; library-relative path helper
 │   ├── similarity.py  # cosine search (thin layer over EmbeddingIndex)
