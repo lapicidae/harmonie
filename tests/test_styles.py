@@ -374,7 +374,7 @@ def api_client_with_styles(tmp_path, make_db):
 
 def test_api_list_tracks_filters_by_style_prefix(api_client_with_styles):
     client, _db = api_client_with_styles
-    r = client.get("/api/v1/tracks", params=[("styles", "Electronic")])
+    r = client.get("/api/v1/tracks", params=[("style", "Electronic")])
     assert r.status_code == 200, r.text
     body = r.json()
     titles = sorted(item["path"] for item in body["items"])
@@ -387,7 +387,7 @@ def test_api_list_tracks_filters_by_style_prefix(api_client_with_styles):
 def test_api_list_tracks_filters_by_exact_style(api_client_with_styles):
     client, _db = api_client_with_styles
     r = client.get(
-        "/api/v1/tracks", params=[("styles", "Electronic---Techno")],
+        "/api/v1/tracks", params=[("style", "Electronic---Techno")],
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -409,7 +409,7 @@ def test_api_styles_endpoint_lists_known_styles(api_client_with_styles):
 def test_api_styles_endpoint_respects_min_probability(api_client_with_styles):
     client, _db = api_client_with_styles
     r = client.get(
-        "/api/v1/styles", params={"min_probability": 0.85},
+        "/api/v1/styles", params={"style_min": 0.85},
     )
     assert r.status_code == 200, r.text
     names = [s["style"] for s in r.json()["items"]]

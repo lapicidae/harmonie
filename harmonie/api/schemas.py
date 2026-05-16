@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Annotated, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
+
+from .filters import FilterBody
 
 
 # ---------------------------------------------------------------------------
@@ -37,24 +39,20 @@ class TrackSummary(BaseModel):
     relative_path: Optional[str] = None
     duration: float
     model: str
-    # Tags from the file itself — useful for matching against external catalogs.
     artist: Optional[str] = None
     album: Optional[str] = None
     title: Optional[str] = None
     track_number: Optional[int] = None
-    # Musical descriptors.
     bpm: Optional[float] = None
     key: Optional[str] = None
     scale: Optional[str] = None
     danceability: Optional[float] = None
-    loudness_db: Optional[float] = None
-    # Top Discogs-400 style activations, highest first. Empty list when the
-    # track was indexed without the genre classifier head.
+    loudness: Optional[float] = None
     styles: list[StyleScore] = Field(default_factory=list)
 
 
 class Track(TrackSummary):
-    """Full track record."""
+    """Full track record with file metadata."""
 
     size: int
     mtime: float
@@ -74,51 +72,11 @@ class TrackList(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Filter query (used by list, similar, playlist)
+# Style enumeration
 # ---------------------------------------------------------------------------
 
 
-class FilterParams(BaseModel):
-    bpm_min: Optional[float] = None
-    bpm_max: Optional[float] = None
-    key: Optional[list[str]] = None
-    scale: Optional[str] = None
-    danceability_min: Optional[float] = None
-    danceability_max: Optional[float] = None
-    loudness_min: Optional[float] = None
-    loudness_max: Optional[float] = None
-    # Discogs-400 style filter. Each entry is either a full ``Genre---Style``
-    # label (exact match) or a bare genre like ``Electronic`` (prefix match,
-    # so ``Electronic`` matches ``Electronic---House``,
-    # ``Electronic---Techno``, …).
-    styles: Optional[list[str]] = Field(
-        None,
-        description=(
-            "Restrict to tracks whose top styles include any of these. "
-            "Use ``Genre---Style`` for an exact match or a bare ``Genre`` "
-            "to match the whole branch."
-        ),
-    )
-    style_min_probability: float = Field(
-        0.0, ge=0.0, le=1.0,
-        description=(
-            "Minimum classifier probability the matching style row must "
-            "have to count. 0 = any top-K hit; raise to demand confidence."
-        ),
-    )
-    style_match: str = Field(
-        "any",
-        pattern="^(any|all)$",
-        description=(
-            "``any``: track must match at least one requested style "
-            "(default). ``all``: every requested style must be present."
-        ),
-    )
-
-
 class StyleEnumeration(BaseModel):
-    """One row of GET /styles output."""
-
     style: str
     track_count: int
     mean_probability: float
@@ -131,15 +89,21 @@ class StyleList(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Similarity / playlist
+# Resolve (find one track by path/tags)
+# ---------------------------------------------------------------------------
+#
+# No request schema — all four fields go in the query string.
+
+
+# ---------------------------------------------------------------------------
+# Similarity / playlist matches
 # ---------------------------------------------------------------------------
 
 
 class MatchOut(BaseModel):
     """A similarity-search or playlist hit, enriched with the metadata an
-    external client needs to map it back to its own catalog without doing a
-    filesystem walk.
-    """
+    external client needs to map it back to its own catalog without doing
+    a filesystem walk."""
 
     track_id: int
     path: str
@@ -158,146 +122,153 @@ class SimilarResult(BaseModel):
     matches: list[MatchOut]
 
 
-class PlaylistBody(BaseModel):
-    """Single endpoint for all playlist generation. The mode is implicit
-    from the parameters you set — there's no separate "mode" enum to choose.
-
-    Modes:
-
-    * **No seeds** → descriptor-driven playlist. ``filter`` constrains the
-      candidate pool; ``target_bpm`` / ``target_danceability`` pull tracks
-      toward those values; ``shuffle`` randomises the order.
-
-    * **One or more seeds** → similarity-driven playlist. The seed track(s)
-      anchor the playlist; the result stays in the same neighbourhood of
-      embedding space. ``bpm_tolerance`` and ``key_compatible`` add
-      smooth-transition constraints.
-
-    * **One seed + drift=true** → "drifting" playlist. Each new track's
-      anchor is the previous selection, so the playlist gradually walks
-      away from the seed in style. Useful for long mixes that evolve.
-    """
-
-    n: int = Field(20, ge=1, le=500, description="Number of tracks to return.")
-
-    # ---- anchoring ---------------------------------------------------
-    seeds: list[int] = Field(
-        default_factory=list,
-        description=(
-            "Track IDs to anchor on. With seeds the playlist is built from "
-            "cosine similarity in the embedding space. Without seeds the "
-            "playlist is built from descriptor targets and filters."
-        ),
-    )
-    drift: bool = Field(
-        False,
-        description=(
-            "Walk away from the seed track instead of staying near it. "
-            "Each new selection becomes the anchor for the next, so the "
-            "playlist drifts in style. Requires exactly one seed."
-        ),
-    )
-    chunk_size: int = Field(
-        5,
-        ge=1,
-        le=100,
-        description=(
-            "How many tracks to take per anchor in drift mode. The "
-            "playlist takes the top-N most similar to the seed, then "
-            "re-anchors on the last of those and takes its top-N, and so "
-            "on. Larger chunks stay closer to the seed; smaller chunks "
-            "drift faster. Only used when drift is true."
-        ),
-    )
-
-    # ---- candidate filter --------------------------------------------
-    filter: Optional[FilterParams] = Field(
-        None,
-        description=(
-            "Hard constraints on candidate tracks (BPM range, key, "
-            "scale, danceability range, loudness range)."
-        ),
-    )
-
-    # ---- smooth-transition rules (similarity modes only) -------------
-    bpm_tolerance: Optional[float] = Field(
-        None,
-        ge=0,
-        description=(
-            "Maximum BPM gap allowed between consecutive tracks. Honored in "
-            "both default and drift modes when seeds are provided."
-        ),
-    )
-    key_compatible: bool = Field(
-        False,
-        description=(
-            "Restrict candidates to keys that mix harmonically with the "
-            "previous track (Camelot wheel: same key, ±1 number on the "
-            "wheel, or parallel mode). Honored in both default and drift "
-            "modes when seeds are provided. In default mode the constraint "
-            "is anchored on the first seed; in drift mode it follows the "
-            "running anchor."
-        ),
-    )
-
-    # ---- descriptor targets (descriptor-only mode) -------------------
-    target_bpm: Optional[float] = Field(
-        None,
-        gt=0,
-        description=(
-            "Rank candidates by closeness to this BPM. Only applied when "
-            "seeds is empty."
-        ),
-    )
-    target_danceability: Optional[float] = Field(
-        None,
-        ge=0,
-        description=(
-            "Rank candidates by closeness to this danceability score. Only "
-            "applied when seeds is empty."
-        ),
-    )
-
-    # ---- output --------------------------------------------------------
-    include_seeds: bool = Field(
-        False,
-        description="Include the seed tracks in the result.",
-    )
-    shuffle: bool = Field(
-        True,
-        description=(
-            "Shuffle the result. Only applied when seeds is empty — "
-            "similarity- and drift-driven playlists are always ordered."
-        ),
-    )
-    rng_seed: Optional[int] = Field(
-        None,
-        description="RNG seed for reproducible shuffling.",
-    )
-
-
-class TrackLookupBody(BaseModel):
-    """Body for POST /tracks/lookup. All fields optional, but at least one
-    must be provided. The handler tries path → relative_path → tag triple →
-    looser tag pair, returning the first match (smallest id wins on ties)."""
-
-    path: Optional[str] = None
-    artist: Optional[str] = None
-    album: Optional[str] = None
-    title: Optional[str] = None
-
-
 class PlaylistResult(BaseModel):
     items: list[MatchOut]
 
 
 # ---------------------------------------------------------------------------
-# Status
+# Playlist body — discriminated by ``mode``
+# ---------------------------------------------------------------------------
+#
+# Each mode has its own validated schema. The OpenAPI document renders these
+# as a ``oneOf`` so the published contract makes the three shapes explicit
+# rather than relying on parameter-implicit dispatch.
+#
+
+
+class _SmoothTransitions(BaseModel):
+    """Consecutive-pair smoothness rules. Used by ``similar`` and ``drift``
+    modes; ignored by ``vibe`` mode (no anchor pair to smooth between)."""
+
+    bpm_tolerance: Optional[float] = Field(
+        None, ge=0,
+        description=(
+            "Maximum BPM gap allowed between consecutive picks. Lenient on "
+            "missing BPMs (skip the check rather than reject the candidate)."
+        ),
+    )
+    key_compatible: bool = Field(
+        False,
+        description=(
+            "Restrict consecutive picks to keys that mix harmonically "
+            "(Camelot wheel: same key, ±1 wheel position, or parallel mode). "
+            "Strict — tracks without key info are excluded when on."
+        ),
+    )
+
+
+class _DescriptorTarget(BaseModel):
+    """Soft preferences for ``vibe`` mode: tracks closer to these values rank
+    higher. Pure ranking — does not gate the candidate pool."""
+
+    bpm: Optional[float] = Field(None, gt=0)
+    danceability: Optional[float] = Field(None, ge=0)
+
+
+class _PlaylistCommon(BaseModel):
+    n: int = Field(20, ge=1, le=500, description="Number of tracks to return.")
+    filter: Optional[FilterBody] = Field(
+        None,
+        description="Hard constraints on the candidate pool.",
+    )
+
+
+class SimilarPlaylist(_PlaylistCommon):
+    """Mode 1: similarity-anchored. The seeds' embedding centroid is the
+    target; results stay close to it."""
+
+    mode: Literal["similar"]
+    seeds: list[int] = Field(..., min_length=1, description="Seed track IDs.")
+    smooth_transitions: _SmoothTransitions = Field(
+        default_factory=_SmoothTransitions,
+        description="Optional consecutive-pair smoothness rules.",
+    )
+    include_seeds: bool = Field(
+        False, description="Include the seed tracks in the result.",
+    )
+
+
+class DriftPlaylist(_PlaylistCommon):
+    """Mode 2: drifting walk. Take ``chunk_size`` similar to the seed,
+    re-anchor on the last pick, repeat."""
+
+    mode: Literal["drift"]
+    seeds: list[int] = Field(
+        ..., min_length=1, max_length=1,
+        description="Single-element list. The drift walk needs one anchor.",
+    )
+    chunk_size: int = Field(
+        5, ge=1, le=100,
+        description=(
+            "Tracks per anchor. Larger = stays closer to the seed; smaller "
+            "= drifts faster."
+        ),
+    )
+    smooth_transitions: _SmoothTransitions = Field(
+        default_factory=_SmoothTransitions,
+    )
+    include_seeds: bool = Field(False)
+
+
+class VibePlaylist(_PlaylistCommon):
+    """Mode 3: descriptor-driven. No seeds; a filter narrows the pool and a
+    target ranks within it."""
+
+    mode: Literal["vibe"]
+    target: _DescriptorTarget = Field(
+        default_factory=_DescriptorTarget,
+        description="Soft preferences. Higher closeness ranks higher.",
+    )
+    shuffle: bool = Field(
+        True,
+        description="Shuffle the (post-target) pool before truncating to n.",
+    )
+    rng_seed: Optional[int] = Field(
+        None, description="Seed for the shuffle. Null = fresh randomness.",
+    )
+
+
+PlaylistBody = Annotated[
+    Union[SimilarPlaylist, DriftPlaylist, VibePlaylist],
+    Field(discriminator="mode"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Service info, stats, scan resource
 # ---------------------------------------------------------------------------
 
 
-class ScanStatusOut(BaseModel):
-    state: str
+class ServiceInfo(BaseModel):
+    """Mostly-static service info. Cache-friendly."""
+
+    version: str
+    backend: str
+    embedding_dim: int
+    libraries: list[str]
+    workers: int
+    db_path: str
+    schema_version: int
+    descriptor_version: int
+
+
+class ServiceStats(BaseModel):
+    """Dynamic numbers. Polls happily."""
+
+    tracks: int
+    total_duration_sec: float
+    db_size_bytes: int
+    by_model: dict[str, int]
+
+
+class ScanState(BaseModel):
+    """Scan-resource representation. Same shape for ``GET /scan`` (current
+    state) and ``POST /scan`` (immediately after triggering)."""
+
+    state: str = Field(
+        ...,
+        description="``idle`` | ``scanning`` | ``error``.",
+    )
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
     last_duration_sec: Optional[float] = None
@@ -309,26 +280,3 @@ class ScanStatusOut(BaseModel):
     failed: int = 0
     removed: int = 0
     recent_failures: list[tuple[str, str]] = Field(default_factory=list)
-
-
-class ServiceStatus(BaseModel):
-    version: str
-    backend: str
-    embedding_dim: int
-    libraries: list[str]
-    workers: int
-    db_path: str
-    db_size_bytes: int
-    tracks: int
-    total_duration_sec: float
-    by_model: dict[str, int]
-    scan: ScanStatusOut
-
-
-class ScanTriggerBody(BaseModel):
-    force: bool = False
-
-
-class ScanTriggerResult(BaseModel):
-    triggered: bool
-    state: str

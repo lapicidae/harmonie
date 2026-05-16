@@ -67,22 +67,59 @@ harmonie similar 1 -n 10
 
 ## API
 
-All endpoints are versioned under `/api/v1/`. If `HARMONIE_API_KEY` is set, every authenticated request must include `X-API-Key: <key>`. `GET /healthz` is always public.
+All endpoints are versioned under `/api/v1/`. If `HARMONIE_API_KEY` is set, every authenticated request must include `X-API-Key: <key>`. `GET /health` is always public.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET`  | `/healthz` | Liveness probe |
-| `GET`  | `/api/v1/status` | Service version, library stats, last scan |
-| `POST` | `/api/v1/scan` | Trigger a scan now (`{"force": false}`) |
-| `GET`  | `/api/v1/scan/status` | Scan progress and counters |
-| `GET`  | `/api/v1/tracks` | List tracks (filters + pagination) |
+| `GET`  | `/health` | Liveness probe |
+| `GET`  | `/api/v1/info` | Static service info: version, libraries, model, schema and descriptor versions |
+| `GET`  | `/api/v1/stats` | Dynamic counters: track count, duration, db size, by-model |
+| `GET`  | `/api/v1/scan` | Current scan state and counters |
+| `POST` | `/api/v1/scan` | Trigger a scan now (`?force=true` to ignore mtime/size) |
+| `GET`  | `/api/v1/tracks` | List tracks (filter + pagination) |
 | `GET`  | `/api/v1/tracks/{id}` | Full track record |
 | `GET`  | `/api/v1/tracks/{id}/similar` | Top-N similar tracks |
-| `POST` | `/api/v1/tracks/lookup` | Find a single track by `path` and/or tags |
+| `GET`  | `/api/v1/tracks/resolve` | Find one track by `path` and/or tags |
 | `GET`  | `/api/v1/styles` | Enumerate Discogs-400 styles in the library |
-| `POST` | `/api/v1/playlists` | Build a playlist (mode implicit from parameters) |
+| `POST` | `/api/v1/playlists` | Build a playlist (mode set explicitly in the body) |
 
 OpenAPI docs are served at `/docs` (Swagger UI) and `/openapi.json`.
+
+### Filters
+
+Both URL and body forms accept the same set of filters and produce the same internal `TrackFilter`. Pick whichever shape fits the call site.
+
+URL form (`/tracks`, `/tracks/{id}/similar`):
+
+```
+?bpm=120..130        closed range
+?bpm=120..           lower bound only
+?bpm=..130           upper bound only
+?bpm=128             exact value
+?key=A&key=B         set membership (repeat the parameter)
+?style=Electronic    prefix match — every Electronic--* style
+?style=Electronic---House  exact label
+?style_min=0.5       only count style rows above this probability
+?style_mode=all      tracks must match every requested style (default: any)
+```
+
+Available filter fields: `bpm`, `danceability`, `loudness`, `key`, `scale`, `style`, `style_min`, `style_mode`.
+
+Body form (`POST /playlists` under `filter`):
+
+```json
+{
+  "filter": {
+    "bpm":      { "gte": 120, "lte": 130 },
+    "loudness": { "lte": -10 },
+    "key":      ["A", "B"],
+    "scale":    "minor",
+    "style":    ["Electronic"],
+    "style_min": 0.5,
+    "style_mode": "any"
+  }
+}
+```
 
 ### Mapping harmonie tracks to an external catalog
 
@@ -93,116 +130,129 @@ Every track and every match in API responses includes the metadata you need to l
 
 `library_root` reflects the configured `HARMONIE_LIBRARIES` entries at scan time. If you reconfigure mount points, re-scan to refresh.
 
-The `POST /api/v1/tracks/lookup` endpoint exposes this matching directly. Send any subset of `{path, artist, album, title}` and get back a single track:
+`GET /api/v1/tracks/resolve` exposes this matching directly. Pass any subset of `{path, artist, album, title}` as query params; the endpoint runs a multi-strategy ladder (exact path → relative path → full tag triple → looser tag pair, all NOCASE for tags) and returns the first hit (smallest id wins on ties):
 
 ```bash
-# By tags (case-insensitive).
-curl -X POST http://localhost:8842/api/v1/tracks/lookup \
-  -H 'content-type: application/json' \
-  -d '{"artist": "Aphex Twin", "album": "SAW", "title": "Xtal"}'
+# By tags.
+curl --get http://localhost:8842/api/v1/tracks/resolve \
+  --data-urlencode 'artist=Aphex Twin' \
+  --data-urlencode 'album=SAW' \
+  --data-urlencode 'title=Xtal'
 
-# By path (works against the absolute path or the relative_path).
-curl -X POST http://localhost:8842/api/v1/tracks/lookup \
-  -H 'content-type: application/json' \
-  -d '{"path": "Aphex Twin/SAW/01 Xtal.flac"}'
+# By path (works against the absolute path or relative_path).
+curl --get http://localhost:8842/api/v1/tracks/resolve \
+  --data-urlencode 'path=Aphex Twin/SAW/01 Xtal.flac'
 ```
 
-The lookup tries strategies in order — exact path, relative path, full tag triple, looser tag pair — and returns the first match (smallest id wins on ties). 404 if nothing matches; 400 if you send an empty body.
-
-### Filter parameters
-
-Both `/tracks` and `/tracks/{id}/similar` accept the same set of optional descriptor filters as query params:
-
-```
-bpm_min, bpm_max, key (repeatable), scale,
-danceability_min, danceability_max, loudness_min, loudness_max,
-styles (repeatable), style_min_probability, style_match
-```
-
-For playlist endpoints the same set is in the body under `filter`.
+400 on an empty request, 404 if no strategy matches.
 
 ### Styles
 
 During scan, harmonie runs Essentia's Discogs-400 classifier head on the same Effnet embeddings used for similarity. Each track gets a 400-dimensional probability vector over Discogs styles like `Electronic---House`, `Hip Hop---Trap`, or `Rock---Punk`. The top 10 (and any above 5% probability) are stored as filterable rows; the full vector is kept as a BLOB for clustering.
 
-Filter by exact label or by a bare genre to match the whole branch:
-
 ```bash
-# Exact: just House tracks.
-curl 'http://localhost:8842/api/v1/tracks?styles=Electronic---House'
+# Filter tracks by exact style.
+curl 'http://localhost:8842/api/v1/tracks?style=Electronic---House'
 
-# Prefix: every Electronic style the model knows.
-curl --get 'http://localhost:8842/api/v1/tracks' --data-urlencode 'styles=Electronic'
+# Prefix match — every Electronic style.
+curl --get 'http://localhost:8842/api/v1/tracks' --data-urlencode 'style=Electronic'
 
-# Several at once. Default match is "any"; pass style_match=all for an
-# intersection.
+# Multiple styles. Default match is "any"; use style_mode=all for AND.
 curl --get 'http://localhost:8842/api/v1/tracks' \
-  --data-urlencode 'styles=Electronic---House' \
-  --data-urlencode 'styles=Electronic---Techno'
+  --data-urlencode 'style=Electronic---House' \
+  --data-urlencode 'style=Electronic---Techno'
 
-# Demand confidence — only count style rows above 0.5 probability.
-curl 'http://localhost:8842/api/v1/tracks?styles=Electronic&style_min_probability=0.5'
+# Demand confidence: only count style rows above 0.5 probability.
+curl 'http://localhost:8842/api/v1/tracks?style=Electronic&style_min=0.5'
+
+# Enumerate styles present in the library.
+curl 'http://localhost:8842/api/v1/styles?style_min=0.5'
 ```
-
-`GET /styles` enumerates every style currently present in the database, with track counts and confidence stats:
-
-```bash
-curl 'http://localhost:8842/api/v1/styles?min_probability=0.5'
-```
-
-Useful for building a UI of available filters and for inspecting how confident the model is across your library.
 
 ### Playlists
 
-One endpoint, `POST /api/v1/playlists`, builds every kind of playlist. The mode is implicit from the parameters you set:
+`POST /api/v1/playlists` builds every kind of playlist. The body has a required `mode` field that selects the strategy. Each mode has its own validated schema — there are no hidden parameter coupling rules.
 
-* **No `seeds`** → descriptor-driven. The candidate pool is whatever passes the `filter`; results are sorted by closeness to `target_bpm` / `target_danceability` and optionally shuffled.
-* **`seeds` set, `drift: false`** (default) → similarity-driven. The seeds anchor the playlist; results stay near them in embedding space. `bpm_tolerance` and `key_compatible` add smooth-transition rules.
-* **One seed, `drift: true`** → drifting walk. Take the top `chunk_size` tracks similar to the seed, then re-anchor on the *last* of those and take its top `chunk_size`, and so on until the playlist hits `n`. Larger `chunk_size` stays closer to the seed; smaller `chunk_size` drifts faster. No track ever appears twice.
+**Mode `similar`** — anchored on the seeds' embedding centroid:
 
-Parameters:
+```bash
+curl -X POST http://localhost:8842/api/v1/playlists \
+  -H 'content-type: application/json' \
+  -d '{
+    "mode": "similar",
+    "n": 20,
+    "seeds": [1, 5, 12],
+    "smooth_transitions": { "bpm_tolerance": 5, "key_compatible": true },
+    "filter": { "bpm": { "gte": 120 } }
+  }'
+```
 
-| Field | Type | Purpose |
+**Mode `drift`** — chunked walk away from one seed:
+
+```bash
+curl -X POST http://localhost:8842/api/v1/playlists \
+  -H 'content-type: application/json' \
+  -d '{
+    "mode": "drift",
+    "n": 30,
+    "seeds": [1],
+    "chunk_size": 5,
+    "smooth_transitions": { "key_compatible": true }
+  }'
+```
+
+**Mode `vibe`** — descriptor-driven, no seeds:
+
+```bash
+curl -X POST http://localhost:8842/api/v1/playlists \
+  -H 'content-type: application/json' \
+  -d '{
+    "mode": "vibe",
+    "n": 30,
+    "filter": { "bpm": { "gte": 120, "lte": 130 } },
+    "target": { "bpm": 128, "danceability": 1.5 },
+    "shuffle": true,
+    "rng_seed": 42
+  }'
+```
+
+| Field | Modes | Purpose |
 | --- | --- | --- |
-| `n` | int (1–500) | How many tracks to return. Default 20. |
-| `seeds` | list[int] | Track IDs to anchor on. Empty = descriptor-driven. |
-| `drift` | bool | Walk away from the seed instead of staying near it. Requires exactly one seed. |
-| `chunk_size` | int (1–100) | Tracks per anchor in drift mode. Default 5. |
-| `filter` | object | Hard descriptor constraints — same shape as `/tracks` query params. |
-| `bpm_tolerance` | float | Max BPM gap between consecutive tracks. Seeds-only. |
-| `key_compatible` | bool | Restrict to keys that mix harmonically with the first seed (Camelot wheel: same key, ±1 number, parallel mode). Seeds-only. |
-| `target_bpm` | float | Pull tracks toward this BPM when ranking. No-seeds-only. |
-| `target_danceability` | float | Pull tracks toward this danceability score when ranking. No-seeds-only. |
-| `include_seeds` | bool | Include seed tracks in the result. |
-| `shuffle` | bool | Randomise order. No-seeds-only. Default true. |
-| `rng_seed` | int | Reproducible shuffle. |
+| `n` | all | Number of tracks. 1–500. Default 20. |
+| `filter` | all | Hard candidate-pool constraints — same shape as the URL filter, in body form. |
+| `seeds` | similar, drift | Track IDs to anchor on. `drift` requires exactly one. |
+| `smooth_transitions.bpm_tolerance` | similar, drift | Max BPM gap between consecutive picks. |
+| `smooth_transitions.key_compatible` | similar, drift | Restrict consecutive picks to harmonically compatible keys (Camelot wheel: same key, ±1 number, parallel mode). |
+| `chunk_size` | drift | Tracks per anchor before re-anchoring on the last pick. 1–100. Default 5. Larger = stays closer to the seed; smaller = drifts faster. |
+| `include_seeds` | similar, drift | Include the seed track(s) in the result. |
+| `target.bpm` | vibe | Soft preference — tracks closer to this BPM rank higher. |
+| `target.danceability` | vibe | Soft preference for closeness to this danceability score. |
+| `shuffle` | vibe | Randomise the (post-target) pool before truncation. Default true. |
+| `rng_seed` | vibe | Seed for reproducible shuffling. |
 
 Examples:
 
 ```bash
-# Similar to track 1, max ±5 BPM jumps, harmonically compatible keys.
-curl -X POST http://localhost:8842/api/v1/playlists \
-  -H 'content-type: application/json' \
-  -d '{
-    "seeds": [1],
-    "n": 20,
-    "bpm_tolerance": 5,
-    "key_compatible": true
-  }'
+# Trigger a scan and watch its progress.
+curl -X POST 'http://localhost:8842/api/v1/scan?force=true'
+while [ "$(curl -sS http://localhost:8842/api/v1/scan | jq -r .state)" != "idle" ]; do
+  sleep 5
+done
 
-# Drift away from track 1 in chunks of 3, total length 25.
-curl -X POST http://localhost:8842/api/v1/playlists \
-  -H 'content-type: application/json' \
-  -d '{"seeds": [1], "drift": true, "chunk_size": 3, "n": 25}'
+# Find every Hard Techno track at 140+ BPM, sorted by BPM descending.
+curl --get http://localhost:8842/api/v1/tracks \
+  --data-urlencode 'style=Electronic---Hard Techno' \
+  --data 'bpm=140..' --data 'order_by=bpm'
 
-# Descriptor-driven: 30 tracks at ~128 BPM, danceability ≥ 1.5.
+# Resolve a track from a Spotify-imported playlist by tags, then ask for
+# 20 similar with key compatibility.
+id=$(curl --get http://localhost:8842/api/v1/tracks/resolve \
+  --data-urlencode 'artist=Aphex Twin' \
+  --data-urlencode 'title=Xtal' | jq .id)
 curl -X POST http://localhost:8842/api/v1/playlists \
   -H 'content-type: application/json' \
-  -d '{
-    "n": 30,
-    "target_bpm": 128,
-    "filter": {"danceability_min": 1.5}
-  }'
+  -d "{\"mode\":\"similar\",\"seeds\":[$id],\"n\":20,
+       \"smooth_transitions\":{\"key_compatible\":true}}"
 ```
 
 ## Configuration

@@ -198,7 +198,7 @@ def cmd_info(args: argparse.Namespace) -> int:
               f"   confidence: {_fmt_opt(row.get('bpm_confidence'), '.2f')}")
         print(f"Key:            {key_disp}"
               f"   strength: {_fmt_opt(row.get('key_strength'), '.2f')}")
-        print(f"Loudness (RG):  {_fmt_opt(row['loudness_db'], '.2f')} dB")
+        print(f"Loudness (RG):  {_fmt_opt(row['loudness'], '.2f')} dB")
         print(f"Danceability:   {_fmt_opt(row['danceability'], '.2f')}")
         print(f"Onset rate:     {_fmt_opt(row['onset_rate'], '.2f')}/s")
         return 0
@@ -264,7 +264,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                 f"{_fmt_opt(r['bpm'], '.1f'):>5}  "
                 f"{key_str:>5}  "
                 f"{_fmt_opt(r['danceability'], '.2f'):>5}  "
-                f"{_fmt_opt(r['loudness_db'], '.1f'):>6}  "
+                f"{_fmt_opt(r['loudness'], '.1f'):>6}  "
                 f"{r['path']}"
             )
         print(f"\n{len(rows)} of {total} track(s).")

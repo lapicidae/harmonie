@@ -11,7 +11,7 @@ Schema design notes:
   with older ``descriptor_version`` are topped up cheaply.
 * When a file disappears between scans, its row is deleted (we don't try to
   detect moves — a moved file looks like delete+add, which is fine).
-* Filter columns (bpm, key, scale, danceability, loudness_db) are indexed
+* Filter columns (bpm, key, scale, danceability, loudness) are indexed
   individually so playlist-style range queries stay fast on large libraries.
 * WAL mode lets the analyzer write while the API serves reads.
 """
@@ -107,10 +107,10 @@ class TrackFilter:
             clauses.append("danceability <= ?")
             params.append(float(self.danceability_max))
         if self.loudness_min is not None:
-            clauses.append("loudness_db >= ?")
+            clauses.append("loudness >= ?")
             params.append(float(self.loudness_min))
         if self.loudness_max is not None:
-            clauses.append("loudness_db <= ?")
+            clauses.append("loudness <= ?")
             params.append(float(self.loudness_max))
         if not clauses:
             return "", []
@@ -227,7 +227,7 @@ class Database:
                     size, mtime, duration, embedding, embedding_dim, model,
                     descriptor_version,
                     bpm, bpm_confidence, key, scale, key_strength,
-                    loudness_db, danceability, onset_rate,
+                    loudness, danceability, onset_rate,
                     artist, album, title, track_number,
                     style_activations,
                     analyzed_at
@@ -249,7 +249,7 @@ class Database:
                     key                  = excluded.key,
                     scale                = excluded.scale,
                     key_strength         = excluded.key_strength,
-                    loudness_db          = excluded.loudness_db,
+                    loudness          = excluded.loudness,
                     danceability         = excluded.danceability,
                     onset_rate           = excluded.onset_rate,
                     artist               = excluded.artist,
@@ -275,7 +275,7 @@ class Database:
                     descriptors.key,
                     descriptors.scale,
                     descriptors.key_strength,
-                    descriptors.loudness_db,
+                    descriptors.loudness,
                     descriptors.danceability,
                     descriptors.onset_rate,
                     t.artist,
@@ -324,7 +324,7 @@ class Database:
             "key                = ?",
             "scale              = ?",
             "key_strength       = ?",
-            "loudness_db        = ?",
+            "loudness        = ?",
             "danceability       = ?",
             "onset_rate         = ?",
             "artist             = ?",
@@ -340,7 +340,7 @@ class Database:
             descriptors.key,
             descriptors.scale,
             descriptors.key_strength,
-            descriptors.loudness_db,
+            descriptors.loudness,
             descriptors.danceability,
             descriptors.onset_rate,
             t.artist,
@@ -502,7 +502,7 @@ class Database:
             SELECT id, path, library_root, relative_path,
                    duration, model, embedding_dim, descriptor_version,
                    bpm, bpm_confidence, key, scale, key_strength,
-                   loudness_db, danceability, onset_rate,
+                   loudness, danceability, onset_rate,
                    artist, album, title, track_number,
                    size, mtime, analyzed_at
               FROM tracks WHERE id IN ({placeholders})
@@ -741,7 +741,7 @@ class Database:
             SELECT id, path, library_root, relative_path,
                    size, mtime, duration, embedding_dim, model,
                    descriptor_version, bpm, bpm_confidence, key, scale,
-                   key_strength, loudness_db, danceability, onset_rate,
+                   key_strength, loudness, danceability, onset_rate,
                    artist, album, title, track_number,
                    analyzed_at
               FROM tracks {where}

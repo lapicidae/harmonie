@@ -107,7 +107,7 @@ class Descriptors:
     key: Optional[str] = None  # e.g. "A", "F#"
     scale: Optional[str] = None  # "major" / "minor"
     key_strength: Optional[float] = None  # [0, 1]
-    loudness_db: Optional[float] = None  # ReplayGain, dB
+    loudness: Optional[float] = None  # ReplayGain, dB
     danceability: Optional[float] = None  # ~[0, 3]
     onset_rate: Optional[float] = None  # onsets per second
 
@@ -279,7 +279,7 @@ def compute_descriptors(audio: np.ndarray) -> Descriptors:
 
     rg = _safe("loudness", lambda: ReplayGain()(audio))
     if rg is not None:
-        d.loudness_db = float(rg)
+        d.loudness = float(rg)
 
     dance = _safe("danceability", lambda: Danceability()(audio))
     if dance is not None:
@@ -525,7 +525,7 @@ class MusicExtractorBackend:
             d.key_strength = float(ks)
         loud = self._get(pool, "lowlevel.average_loudness")
         if loud is not None:
-            d.loudness_db = float(loud)
+            d.loudness = float(loud)
         dance = self._get(pool, "rhythm.danceability")
         if dance is not None:
             d.danceability = float(dance)

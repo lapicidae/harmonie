@@ -71,7 +71,7 @@ _M001_STATEMENTS = [
         key                   TEXT,
         scale                 TEXT,
         key_strength          REAL,
-        loudness_db           REAL,
+        loudness           REAL,
         danceability          REAL,
         onset_rate            REAL,
         -- Tags from the file itself (mutagen). Used by external clients to
@@ -94,7 +94,7 @@ _M001_STATEMENTS = [
     "CREATE INDEX idx_tracks_bpm         ON tracks(bpm)",
     "CREATE INDEX idx_tracks_key_scale   ON tracks(key, scale)",
     "CREATE INDEX idx_tracks_dance       ON tracks(danceability)",
-    "CREATE INDEX idx_tracks_loud        ON tracks(loudness_db)",
+    "CREATE INDEX idx_tracks_loud        ON tracks(loudness)",
     "CREATE INDEX idx_tracks_descv       ON tracks(descriptor_version)",
     "CREATE INDEX idx_tracks_lib         ON tracks(library_root)",
     # Composite NOCASE index for the /tracks/lookup endpoint's tag triple.

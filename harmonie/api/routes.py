@@ -6,13 +6,15 @@ import asyncio
 import logging
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from fastapi.security import APIKeyHeader
 
 from .. import __version__
 from ..analyzer import Analyzer
 from ..db import Database, TrackFilter
 from ..index import EmbeddingIndex
+from ..migrations import CURRENT_SCHEMA_VERSION
+from ..features import DESCRIPTOR_VERSION
 from ..playlist import (
     ChainedPlaylistRequest,
     SimilarPlaylistRequest,
@@ -22,23 +24,24 @@ from ..playlist import (
     generate_vibe_playlist,
 )
 from ..similarity import find_similar_to_id
+from .filters import build_track_filter
 from .schemas import (
-    FilterParams,
+    DriftPlaylist,
     MatchOut,
     PlaylistBody,
     PlaylistResult,
-    ScanStatusOut,
-    ScanTriggerBody,
-    ScanTriggerResult,
-    ServiceStatus,
+    ScanState,
+    ServiceInfo,
+    ServiceStats,
+    SimilarPlaylist,
     SimilarResult,
     StyleEnumeration,
     StyleList,
     StyleScore,
     Track,
     TrackList,
-    TrackLookupBody,
     TrackSummary,
+    VibePlaylist,
 )
 
 logger = logging.getLogger("harmonie.api")
@@ -81,24 +84,6 @@ def require_api_key(
 # ---------------------------------------------------------------------------
 
 
-def _filter_from_params(p: Optional[FilterParams]) -> Optional[TrackFilter]:
-    if p is None:
-        return None
-    return TrackFilter(
-        bpm_min=p.bpm_min,
-        bpm_max=p.bpm_max,
-        key=p.key,
-        scale=p.scale,
-        danceability_min=p.danceability_min,
-        danceability_max=p.danceability_max,
-        loudness_min=p.loudness_min,
-        loudness_max=p.loudness_max,
-        styles=p.styles,
-        style_min_probability=p.style_min_probability,
-        style_match=p.style_match,
-    )
-
-
 def _styles_to_schema(rows: list[tuple[str, float]]) -> list[StyleScore]:
     return [StyleScore(style=s, probability=p) for s, p in rows]
 
@@ -121,7 +106,7 @@ def _row_to_summary(
         key=row.get("key"),
         scale=row.get("scale"),
         danceability=row.get("danceability"),
-        loudness_db=row.get("loudness_db"),
+        loudness=row.get("loudness"),
         styles=_styles_to_schema(styles or []),
     )
 
@@ -154,38 +139,82 @@ def _enrich_matches(db: Database, matches) -> list[MatchOut]:
     return out
 
 
+def _filter_from_query(
+    bpm: Optional[str],
+    danceability: Optional[str],
+    loudness: Optional[str],
+    key: Optional[list[str]],
+    scale: Optional[str],
+    style: Optional[list[str]],
+    style_min: float,
+    style_mode: str,
+) -> TrackFilter:
+    """Glue between FastAPI Query params and the TrackFilter constructor."""
+    try:
+        return build_track_filter(
+            bpm=bpm,
+            danceability=danceability,
+            loudness=loudness,
+            key=key,
+            scale=scale,
+            style=style,
+            style_min=style_min,
+            style_mode=style_mode,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"invalid range filter: {e}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
 
-# Public routes (no auth) — health is always reachable.
+# Public: only the liveness probe.
 public_router = APIRouter()
 
-# Authenticated routes.
+# Authenticated.
 api_router = APIRouter(dependencies=[Depends(require_api_key)])
 
 
-@public_router.get("/healthz")
-def healthz() -> dict:
+# ---- service info / health ----------------------------------------------
+
+
+@public_router.get("/health")
+def health() -> dict:
+    """Liveness probe. Always returns ``{"status": "ok"}`` when reachable."""
     return {"status": "ok"}
 
 
-@api_router.get("/status", response_model=ServiceStatus)
-def get_status(analyzer: Analyzer = Depends(get_analyzer)) -> ServiceStatus:
-    s = analyzer.db.stats()
+@api_router.get("/info", response_model=ServiceInfo)
+def service_info(analyzer: Analyzer = Depends(get_analyzer)) -> ServiceInfo:
+    """Mostly-static service info: version, library config, model, schema
+    and descriptor versions. Safe to cache for a minute or two."""
     settings = analyzer.settings
-    return ServiceStatus(
+    s = analyzer.db.stats()
+    return ServiceInfo(
         version=__version__,
         backend=settings.backend,
         embedding_dim=analyzer.embedding_dim,
         libraries=[str(p) for p in settings.libraries],
         workers=settings.worker_count,
         db_path=s["db_path"],
-        db_size_bytes=s["db_size_bytes"],
+        schema_version=CURRENT_SCHEMA_VERSION,
+        descriptor_version=DESCRIPTOR_VERSION,
+    )
+
+
+@api_router.get("/stats", response_model=ServiceStats)
+def service_stats(analyzer: Analyzer = Depends(get_analyzer)) -> ServiceStats:
+    """Dynamic counters: track count, total duration, db size, by-model
+    breakdown. Poll-friendly."""
+    s = analyzer.db.stats()
+    return ServiceStats(
         tracks=s["tracks"],
         total_duration_sec=s["total_duration_sec"],
+        db_size_bytes=s["db_size_bytes"],
         by_model=s["by_model"],
-        scan=ScanStatusOut(**analyzer.status.snapshot()),
     )
 
 
@@ -195,30 +224,37 @@ def get_status(analyzer: Analyzer = Depends(get_analyzer)) -> ServiceStatus:
 @api_router.get("/tracks", response_model=TrackList)
 def list_tracks(
     db: Database = Depends(get_db),
-    bpm_min: Optional[float] = Query(None),
-    bpm_max: Optional[float] = Query(None),
-    key: Optional[list[str]] = Query(None),
-    scale: Optional[str] = Query(None),
-    danceability_min: Optional[float] = Query(None),
-    danceability_max: Optional[float] = Query(None),
-    loudness_min: Optional[float] = Query(None),
-    loudness_max: Optional[float] = Query(None),
-    styles: Optional[list[str]] = Query(
+    bpm: Optional[str] = Query(
         None,
         description=(
-            "Filter by Discogs-400 style. Repeat the param to pass several. "
-            "Use ``Genre---Style`` for an exact match (e.g. "
-            "``Electronic---House``) or just the genre prefix "
-            "(e.g. ``Electronic``) to match the whole branch."
+            "BPM filter. ``120..130`` (closed range), ``120..`` (lower "
+            "only), ``..130`` (upper only), or ``128`` (exact)."
         ),
+        examples=["120..130"],
     ),
-    style_min_probability: float = Query(
-        0.0, ge=0.0, le=1.0,
+    danceability: Optional[str] = Query(
+        None, description="Same range syntax as ``bpm``.",
+    ),
+    loudness: Optional[str] = Query(
+        None,
+        description="ReplayGain in dB; same range syntax. e.g. ``..-10``.",
+    ),
+    key: Optional[list[str]] = Query(
+        None, description="Filter by key. Repeat the param for OR.",
+    ),
+    scale: Optional[str] = Query(None, description="``major`` or ``minor``."),
+    style: Optional[list[str]] = Query(
+        None,
         description=(
-            "Minimum classifier probability the matched style row must have."
+            "Discogs-400 style filter. ``Genre---Style`` matches exactly; "
+            "a bare ``Genre`` matches the whole branch. Repeatable."
         ),
     ),
-    style_match: str = Query(
+    style_min: float = Query(
+        0.0, ge=0.0, le=1.0,
+        description="Minimum classifier probability for a style row to count.",
+    ),
+    style_mode: str = Query(
         "any", pattern="^(any|all)$",
         description="``any`` (default) or ``all`` of the requested styles.",
     ),
@@ -227,18 +263,8 @@ def list_tracks(
     order_by: str = Query("id", pattern="^(id|path|bpm|duration|analyzed_at)$"),
     model: Optional[str] = Query(None),
 ) -> TrackList:
-    f = TrackFilter(
-        bpm_min=bpm_min,
-        bpm_max=bpm_max,
-        key=key,
-        scale=scale,
-        danceability_min=danceability_min,
-        danceability_max=danceability_max,
-        loudness_min=loudness_min,
-        loudness_max=loudness_max,
-        styles=styles,
-        style_min_probability=style_min_probability,
-        style_match=style_match,
+    f = _filter_from_query(
+        bpm, danceability, loudness, key, scale, style, style_min, style_mode,
     )
     rows, total = db.list_tracks(
         filter=f, model=model, limit=limit, offset=offset, order_by=order_by
@@ -252,27 +278,38 @@ def list_tracks(
     )
 
 
-@api_router.post("/tracks/lookup", response_model=Track)
-def lookup_track(
-    body: TrackLookupBody, db: Database = Depends(get_db)
+@api_router.get("/tracks/resolve", response_model=Track)
+def resolve_track(
+    db: Database = Depends(get_db),
+    path: Optional[str] = Query(
+        None,
+        description=(
+            "Absolute or library-relative path. Tried first; falls through "
+            "to tag matching if not found."
+        ),
+    ),
+    artist: Optional[str] = Query(None),
+    album: Optional[str] = Query(None),
+    title: Optional[str] = Query(None),
 ) -> Track:
-    """Find a single track by path and/or tags.
+    """Find one track by path and/or tags using a multi-strategy ladder.
 
-    Useful for external clients (e.g. media-server plugins) that want to
-    map a track from their own catalog onto a harmonie track without doing
-    a filesystem walk. See :class:`TrackLookupBody` for matching strategy.
+    Strategies, in order; first hit wins:
+
+    1. Exact match on absolute ``path``.
+    2. Exact match on ``relative_path`` — useful when the caller's mount
+       point differs from harmonie's view of the same library.
+    3. Case-insensitive match on the (artist, album, title) triple.
+    4. Case-insensitive match on (title, artist) or (title, album).
+
+    400 if every parameter is missing. 404 if no strategy matches.
     """
-    if not (body.path or body.artist or body.album or body.title):
+    if not (path or artist or album or title):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "at least one of path, artist, album, title must be provided",
         )
-    row = db.find_track(
-        path=body.path,
-        artist=body.artist,
-        album=body.album,
-        title=body.title,
-    )
+    row = db.find_track(path=path, artist=artist, album=album, title=title)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no matching track")
     styles = db.get_track_styles(int(row["id"]))
@@ -293,36 +330,23 @@ def similar_to(
     track_id: int,
     db: Database = Depends(get_db),
     index: EmbeddingIndex = Depends(get_index),
-    n: int = Query(10, ge=1, le=500),
-    bpm_min: Optional[float] = Query(None),
-    bpm_max: Optional[float] = Query(None),
+    limit: int = Query(10, ge=1, le=500),
+    bpm: Optional[str] = Query(None),
+    danceability: Optional[str] = Query(None),
+    loudness: Optional[str] = Query(None),
     key: Optional[list[str]] = Query(None),
     scale: Optional[str] = Query(None),
-    danceability_min: Optional[float] = Query(None),
-    danceability_max: Optional[float] = Query(None),
-    loudness_min: Optional[float] = Query(None),
-    loudness_max: Optional[float] = Query(None),
-    styles: Optional[list[str]] = Query(None),
-    style_min_probability: float = Query(0.0, ge=0.0, le=1.0),
-    style_match: str = Query("any", pattern="^(any|all)$"),
+    style: Optional[list[str]] = Query(None),
+    style_min: float = Query(0.0, ge=0.0, le=1.0),
+    style_mode: str = Query("any", pattern="^(any|all)$"),
     include_self: bool = Query(False),
 ) -> SimilarResult:
-    f = TrackFilter(
-        bpm_min=bpm_min,
-        bpm_max=bpm_max,
-        key=key,
-        scale=scale,
-        danceability_min=danceability_min,
-        danceability_max=danceability_max,
-        loudness_min=loudness_min,
-        loudness_max=loudness_max,
-        styles=styles,
-        style_min_probability=style_min_probability,
-        style_match=style_match,
+    f = _filter_from_query(
+        bpm, danceability, loudness, key, scale, style, style_min, style_mode,
     )
     try:
         matches = find_similar_to_id(
-            db, index, track_id, n=n, filter=f, include_self=include_self
+            db, index, track_id, n=limit, filter=f, include_self=include_self
         )
     except KeyError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"track {track_id} not found")
@@ -332,14 +356,16 @@ def similar_to(
     )
 
 
+# ---- styles --------------------------------------------------------------
+
+
 @api_router.get("/styles", response_model=StyleList)
 def list_styles(
     db: Database = Depends(get_db),
-    min_probability: float = Query(
+    style_min: float = Query(
         0.0, ge=0.0, le=1.0,
         description=(
-            "Only count style rows whose probability is at least this high. "
-            "0 (default) returns every style any track was tagged with."
+            "Only count style rows whose probability is at least this high."
         ),
     ),
 ) -> StyleList:
@@ -348,7 +374,7 @@ def list_styles(
     Useful for building a UI of available filters and for sanity-checking
     the classifier's distribution across the library.
     """
-    rows = db.list_styles(min_probability=min_probability)
+    rows = db.list_styles(min_probability=style_min)
     return StyleList(
         items=[StyleEnumeration(**r) for r in rows],
         total=len(rows),
@@ -360,39 +386,36 @@ def list_styles(
 
 @api_router.post("/playlists", response_model=PlaylistResult)
 def make_playlist(
-    body: PlaylistBody,
+    body: Annotated[PlaylistBody, Body(...)],
     db: Database = Depends(get_db),
     index: EmbeddingIndex = Depends(get_index),
 ) -> PlaylistResult:
-    """Build a playlist. The mode is implicit from the parameters:
+    """Generate a playlist. The body's ``mode`` field selects the strategy:
 
-    * No seeds → descriptor-driven (filters + targets + shuffle).
-    * Seeds + drift=true → drifting walk anchored on the previous selection.
-    * Seeds + drift=false → similarity-anchored on the seed centroid, with
-      optional smooth-transition rules (bpm_tolerance, key_compatible).
+    * ``similar``: anchored on the seeds' embedding centroid.
+    * ``drift``: walk away from one seed in chunks, re-anchoring on the
+      most recent pick each chunk.
+    * ``vibe``: descriptor-driven; ``filter`` narrows the pool and
+      ``target`` ranks within it.
     """
-    descriptor_filter = _filter_from_params(body.filter)
+    descriptor_filter = (
+        body.filter.to_track_filter() if body.filter is not None else None
+    )
 
     try:
-        if not body.seeds:
-            # Descriptor-driven mode.
-            items = generate_vibe_playlist(
-                db,
-                VibePlaylistRequest(
+        if isinstance(body, SimilarPlaylist):
+            items = generate_similar_playlist(
+                db, index,
+                SimilarPlaylistRequest(
+                    seed_ids=body.seeds,
                     n=body.n,
+                    bpm_drift=body.smooth_transitions.bpm_tolerance,
+                    harmonic_mix=body.smooth_transitions.key_compatible,
                     descriptor_filter=descriptor_filter,
-                    target_bpm=body.target_bpm,
-                    target_danceability=body.target_danceability,
-                    shuffle=body.shuffle,
-                    seed=body.rng_seed,
+                    include_seeds=body.include_seeds,
                 ),
             )
-        elif body.drift:
-            if len(body.seeds) != 1:
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    "drift mode requires exactly one seed",
-                )
+        elif isinstance(body, DriftPlaylist):
             items = generate_chained_playlist(
                 db, index,
                 ChainedPlaylistRequest(
@@ -401,21 +424,25 @@ def make_playlist(
                     n=body.n,
                     descriptor_filter=descriptor_filter,
                     include_seed=body.include_seeds,
-                    bpm_drift=body.bpm_tolerance,
-                    harmonic_mix=body.key_compatible,
+                    bpm_drift=body.smooth_transitions.bpm_tolerance,
+                    harmonic_mix=body.smooth_transitions.key_compatible,
                 ),
             )
-        else:
-            items = generate_similar_playlist(
-                db, index,
-                SimilarPlaylistRequest(
-                    seed_ids=body.seeds,
+        elif isinstance(body, VibePlaylist):
+            items = generate_vibe_playlist(
+                db,
+                VibePlaylistRequest(
                     n=body.n,
-                    bpm_drift=body.bpm_tolerance,
-                    harmonic_mix=body.key_compatible,
                     descriptor_filter=descriptor_filter,
-                    include_seeds=body.include_seeds,
+                    target_bpm=body.target.bpm,
+                    target_danceability=body.target.danceability,
+                    shuffle=body.shuffle,
+                    seed=body.rng_seed,
                 ),
+            )
+        else:  # pragma: no cover - exhaustive
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, f"unknown playlist mode: {body!r}"
             )
     except KeyError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
@@ -425,23 +452,35 @@ def make_playlist(
     return PlaylistResult(items=_enrich_matches(db, items))
 
 
-# ---- admin ---------------------------------------------------------------
+# ---- scan resource -------------------------------------------------------
 
 
-@api_router.post("/scan", response_model=ScanTriggerResult)
+@api_router.post("/scan", response_model=ScanState)
 async def trigger_scan(
-    body: ScanTriggerBody, analyzer: Analyzer = Depends(get_analyzer)
-) -> ScanTriggerResult:
-    if analyzer.status.state == "scanning":
-        return ScanTriggerResult(triggered=False, state="scanning")
-    # Run in thread so the API doesn't block the event loop.
-    asyncio.create_task(asyncio.to_thread(analyzer.scan, force=body.force))
-    # Yield briefly so the task picks up the lock and flips state to "scanning"
-    # before we report back.
-    await asyncio.sleep(0)
-    return ScanTriggerResult(triggered=True, state=analyzer.status.state)
+    analyzer: Analyzer = Depends(get_analyzer),
+    force: bool = Query(
+        False,
+        description=(
+            "Re-extract embeddings for every track even if size + mtime "
+            "match an existing row."
+        ),
+    ),
+) -> ScanState:
+    """Trigger a scan in the background.
+
+    Returns the *current* scan state. If a scan is already running, this is
+    a no-op (the response will show ``state: scanning``).
+    """
+    if analyzer.status.state != "scanning":
+        # Run in thread so the API doesn't block the event loop.
+        asyncio.create_task(asyncio.to_thread(analyzer.scan, force=force))
+        # Yield briefly so the task picks up the lock and flips state to
+        # "scanning" before we report back.
+        await asyncio.sleep(0)
+    return ScanState(**analyzer.status.snapshot())
 
 
-@api_router.get("/scan/status", response_model=ScanStatusOut)
-def scan_status(analyzer: Analyzer = Depends(get_analyzer)) -> ScanStatusOut:
-    return ScanStatusOut(**analyzer.status.snapshot())
+@api_router.get("/scan", response_model=ScanState)
+def get_scan(analyzer: Analyzer = Depends(get_analyzer)) -> ScanState:
+    """Current scan state and counters."""
+    return ScanState(**analyzer.status.snapshot())

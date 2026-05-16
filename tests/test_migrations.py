@@ -159,7 +159,7 @@ def test_migration_001_columns_match_db_layer_expectations(tmp_path: Path):
         "embedding", "embedding_dim", "model",
         "descriptor_version",
         "bpm", "bpm_confidence", "key", "scale", "key_strength",
-        "loudness_db", "danceability", "onset_rate",
+        "loudness", "danceability", "onset_rate",
         "artist", "album", "title", "track_number",
         "analyzed_at",
     }

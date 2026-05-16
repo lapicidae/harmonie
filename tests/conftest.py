@@ -34,7 +34,7 @@ def fake_descriptors():
             key="C",
             scale="major",
             key_strength=0.8,
-            loudness_db=-12.0,
+            loudness=-12.0,
             danceability=1.5,
             onset_rate=4.2,
         )
