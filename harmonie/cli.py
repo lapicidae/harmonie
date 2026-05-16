@@ -137,7 +137,6 @@ def cmd_scan(args: argparse.Namespace) -> int:
     from .analyzer import Analyzer
 
     analyzer = Analyzer(settings)
-    analyzer.start()
     try:
         analyzer.scan(force=args.force)
         snap = analyzer.status.snapshot()

@@ -125,10 +125,6 @@ class Analyzer:
         return self.status
 
     def _run_scan(self, *, force: bool) -> None:
-        if self.pool is None:
-            self.start()
-        assert self.pool is not None
-
         self.status = ScanStatus(state="scanning", started_at=time.time())
         t0 = time.monotonic()
 
@@ -148,7 +144,24 @@ class Analyzer:
         for p in unreachable:
             logger.warning("library root unreachable, skipping: %s", p)
 
-        files = list(iter_audio_files(reachable))
+        # Enumerate files. On slow mounts (NFS, remote SMB) this can take
+        # minutes. Log a status line every 10 seconds so users see progress
+        # rather than wondering if the process is stuck.
+        if reachable:
+            logger.info(
+                "scanning libraries: %s",
+                ", ".join(str(p) for p in reachable),
+            )
+        files: list[Path] = []
+        last_progress = time.monotonic()
+        for f in iter_audio_files(reachable):
+            files.append(f)
+            now = time.monotonic()
+            if now - last_progress > 10:
+                logger.info(
+                    "enumerating: %d audio file(s) found so far...", len(files),
+                )
+                last_progress = now
         self.status.discovered = len(files)
         logger.info("discovered %d audio file(s)", len(files))
 
@@ -161,10 +174,13 @@ class Analyzer:
             len(full_jobs), len(desc_jobs), skipped,
         )
 
-        # Send full jobs first (they're slower) so descriptor top-ups can
-        # benefit from spare workers later.
+        # Defer worker pool startup until we know there's work. Saves a
+        # multi-second TF model load when the scan is a no-op.
         all_jobs: list = list(full_jobs) + list(desc_jobs)
         if all_jobs:
+            if self.pool is None:
+                self.start()
+            assert self.pool is not None
             for result in self.pool.map(all_jobs, chunksize=1):
                 self._handle_result(result, reachable_roots=reachable)
 

@@ -23,7 +23,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         analyzer = Analyzer(settings)
-        analyzer.start()
+        # Don't eagerly start the worker pool — the analyzer creates it on
+        # demand at the start of the first scan. That way the (multi-second)
+        # TF model load happens during a scan, not at app startup, and the
+        # service starts serving requests immediately.
         app.state.analyzer = analyzer
         app.state.settings = settings
 
