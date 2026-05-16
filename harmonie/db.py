@@ -545,20 +545,16 @@ class Database:
         )
         return {int(r["id"]) for r in cur}
 
-    def bpm_by_id_for_model(self, model: str) -> dict[int, Optional[float]]:
-        """Return a ``{track_id: bpm}`` map for one model. Used by the
-        similar-seeded playlist for the bpm-drift constraint."""
-        cur = self._conn.execute(
-            "SELECT id, bpm FROM tracks WHERE model = ?", (model,)
-        )
-        return {int(r["id"]): r["bpm"] for r in cur}
-
     def bpm_key_by_id_for_model(
         self, model: str
     ) -> dict[int, tuple[Optional[float], Optional[str], Optional[str]]]:
-        """Return ``{track_id: (bpm, key, scale)}`` for one model. Used by the
-        chained playlist generator to check each candidate's BPM and key
-        against the previous pick without re-querying the DB per candidate."""
+        """Return ``{track_id: (bpm, key, scale)}`` for one model.
+
+        Used by playlist generators to check each candidate's descriptors
+        against the previous pick (or against the seed) without re-querying
+        the DB per candidate. Callers that only need BPM ignore the key
+        and scale columns.
+        """
         cur = self._conn.execute(
             "SELECT id, bpm, key, scale FROM tracks WHERE model = ?",
             (model,),

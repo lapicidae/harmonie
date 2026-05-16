@@ -10,8 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-import numpy as np
-
 from .db import Database, TrackFilter
 from .index import EmbeddingIndex, IndexMatch
 
@@ -64,31 +62,5 @@ def find_similar_to_id(
         n=n,
         allowed_ids=allowed_ids,
         exclude_ids=set() if include_self else {track_id},
-    )
-    return [_to_match(m) for m in matches]
-
-
-def find_similar_to_vector(
-    db: Database,
-    index: EmbeddingIndex,
-    embedding: np.ndarray,
-    *,
-    model: str,
-    n: int = 10,
-    filter: Optional[TrackFilter] = None,
-    exclude_ids: Optional[set[int]] = None,
-) -> list[Match]:
-    """Top-N similar to a pre-computed embedding (e.g. from an external
-    request such as 'play me music like this audio I just uploaded')."""
-    allowed_ids: Optional[set[int]] = None
-    if filter is not None and not filter.is_empty():
-        allowed_ids = db.filtered_ids(filter=filter, model=model)
-
-    matches = index.search(
-        embedding,
-        model=model,
-        n=n,
-        allowed_ids=allowed_ids,
-        exclude_ids=exclude_ids or set(),
     )
     return [_to_match(m) for m in matches]

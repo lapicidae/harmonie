@@ -403,3 +403,55 @@ class TestPlaylistDiscriminator:
             },
         )
         assert r.status_code == 200, r.text
+
+
+
+# ---------------------------------------------------------------------------
+# API key auth — gated by HARMONIE_API_KEY at app construction time
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def client_with_api_key(tmp_path: Path, make_db):
+    """Same wiring as ``client`` but with an API key configured. Settings is
+    constructed with ``api_key`` directly so we don't need to touch env."""
+    db, index = make_db("api-keyed.db")
+    _populate(db, "fast.flac", bpm=130)
+
+    settings = Settings(
+        libraries=[tmp_path], data_dir=tmp_path, api_key="s3cret",
+    )
+    app = FastAPI()
+    app.include_router(public_router)
+    app.include_router(api_router, prefix="/api/v1")
+    app.state.analyzer = _stub_analyzer(db, index, settings)
+    app.state.settings = settings
+    return TestClient(app)
+
+
+class TestApiKeyAuth:
+    def test_health_is_public_even_with_key_set(self, client_with_api_key):
+        """``/health`` must never require auth — it's the liveness probe."""
+        assert client_with_api_key.get("/health").status_code == 200
+
+    def test_missing_key_rejected(self, client_with_api_key):
+        r = client_with_api_key.get("/api/v1/status")
+        assert r.status_code == 401
+
+    def test_wrong_key_rejected(self, client_with_api_key):
+        r = client_with_api_key.get(
+            "/api/v1/status", headers={"X-API-Key": "wrong"},
+        )
+        assert r.status_code == 401
+
+    def test_correct_key_accepted(self, client_with_api_key):
+        r = client_with_api_key.get(
+            "/api/v1/status", headers={"X-API-Key": "s3cret"},
+        )
+        assert r.status_code == 200, r.text
+
+    def test_no_key_required_when_unconfigured(self, client):
+        """The default ``client`` fixture has no api_key set — every route
+        should pass through unauthenticated."""
+        c, _ = client
+        assert c.get("/api/v1/status").status_code == 200

@@ -138,17 +138,52 @@ def _enrich_matches(db: Database, matches) -> list[MatchOut]:
     return out
 
 
-def _filter_from_query(
-    bpm: Optional[str],
-    danceability: Optional[str],
-    loudness: Optional[str],
-    key: Optional[list[str]],
-    scale: Optional[str],
-    style: Optional[list[str]],
-    style_min: float,
-    style_mode: str,
+def filter_query(
+    bpm: Optional[str] = Query(
+        None,
+        description=(
+            "BPM filter. ``120..130`` (closed range), ``120..`` (lower "
+            "only), ``..130`` (upper only), or ``128`` (exact)."
+        ),
+        examples=["120..130"],
+    ),
+    danceability: Optional[str] = Query(
+        None, description="Same range syntax as ``bpm``.",
+    ),
+    loudness: Optional[str] = Query(
+        None,
+        description="ReplayGain in dB; same range syntax. e.g. ``..-10``.",
+    ),
+    key: Optional[list[str]] = Query(
+        None, description="Filter by key. Repeat the param for OR.",
+    ),
+    scale: Optional[str] = Query(
+        None, description="``major`` or ``minor``.",
+    ),
+    style: Optional[list[str]] = Query(
+        None,
+        description=(
+            "Discogs-400 style filter. ``Genre---Style`` matches exactly; "
+            "a bare ``Genre`` matches the whole branch. Repeatable."
+        ),
+    ),
+    style_min: float = Query(
+        0.0, ge=0.0, le=1.0,
+        description="Minimum classifier probability for a style row to count.",
+    ),
+    style_mode: str = Query(
+        "any", pattern="^(any|all)$",
+        description="``any`` (default) or ``all`` of the requested styles.",
+    ),
 ) -> TrackFilter:
-    """Glue between FastAPI Query params and the TrackFilter constructor."""
+    """FastAPI dependency: compose a :class:`TrackFilter` from the eight
+    query-string filter parameters shared by ``GET /tracks`` and
+    ``GET /tracks/{id}/similar``.
+
+    Each ``Query(...)`` definition lives here once. FastAPI introspects
+    this dependency, so the OpenAPI document still shows every parameter
+    on the endpoints that depend on it.
+    """
     try:
         return build_track_filter(
             bpm=bpm,
@@ -214,48 +249,12 @@ def get_status(analyzer: Analyzer = Depends(get_analyzer)) -> ServiceStatus:
 @api_router.get("/tracks", response_model=TrackList)
 def list_tracks(
     db: Database = Depends(get_db),
-    bpm: Optional[str] = Query(
-        None,
-        description=(
-            "BPM filter. ``120..130`` (closed range), ``120..`` (lower "
-            "only), ``..130`` (upper only), or ``128`` (exact)."
-        ),
-        examples=["120..130"],
-    ),
-    danceability: Optional[str] = Query(
-        None, description="Same range syntax as ``bpm``.",
-    ),
-    loudness: Optional[str] = Query(
-        None,
-        description="ReplayGain in dB; same range syntax. e.g. ``..-10``.",
-    ),
-    key: Optional[list[str]] = Query(
-        None, description="Filter by key. Repeat the param for OR.",
-    ),
-    scale: Optional[str] = Query(None, description="``major`` or ``minor``."),
-    style: Optional[list[str]] = Query(
-        None,
-        description=(
-            "Discogs-400 style filter. ``Genre---Style`` matches exactly; "
-            "a bare ``Genre`` matches the whole branch. Repeatable."
-        ),
-    ),
-    style_min: float = Query(
-        0.0, ge=0.0, le=1.0,
-        description="Minimum classifier probability for a style row to count.",
-    ),
-    style_mode: str = Query(
-        "any", pattern="^(any|all)$",
-        description="``any`` (default) or ``all`` of the requested styles.",
-    ),
+    f: TrackFilter = Depends(filter_query),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     order_by: str = Query("id", pattern="^(id|path|bpm|duration|analyzed_at)$"),
     model: Optional[str] = Query(None),
 ) -> TrackList:
-    f = _filter_from_query(
-        bpm, danceability, loudness, key, scale, style, style_min, style_mode,
-    )
     rows, total = db.list_tracks(
         filter=f, model=model, limit=limit, offset=offset, order_by=order_by
     )
@@ -320,20 +319,10 @@ def similar_to(
     track_id: int,
     db: Database = Depends(get_db),
     index: EmbeddingIndex = Depends(get_index),
+    f: TrackFilter = Depends(filter_query),
     limit: int = Query(10, ge=1, le=500),
-    bpm: Optional[str] = Query(None),
-    danceability: Optional[str] = Query(None),
-    loudness: Optional[str] = Query(None),
-    key: Optional[list[str]] = Query(None),
-    scale: Optional[str] = Query(None),
-    style: Optional[list[str]] = Query(None),
-    style_min: float = Query(0.0, ge=0.0, le=1.0),
-    style_mode: str = Query("any", pattern="^(any|all)$"),
     include_self: bool = Query(False),
 ) -> SimilarResult:
-    f = _filter_from_query(
-        bpm, danceability, loudness, key, scale, style, style_min, style_mode,
-    )
     try:
         matches = find_similar_to_id(
             db, index, track_id, n=limit, filter=f, include_self=include_self

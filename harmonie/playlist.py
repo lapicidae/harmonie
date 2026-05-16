@@ -160,8 +160,12 @@ def generate_similar_playlist(
 
     seed_id_set = set(req.seed_ids)
     seed_bpms = [r["bpm"] for r in seed_rows if r.get("bpm") is not None]
-    bpm_lookup = (
-        db.bpm_by_id_for_model(model) if req.bpm_drift is not None else {}
+    # bpm_drift gate uses just the BPM column from the (bpm, key, scale)
+    # bulk lookup. Cheaper than a second query.
+    bpm_lookup: dict[int, Optional[float]] = (
+        {tid: meta[0] for tid, meta in db.bpm_key_by_id_for_model(model).items()}
+        if req.bpm_drift is not None
+        else {}
     )
 
     # Score every track against the centroid and oversample for the walk.

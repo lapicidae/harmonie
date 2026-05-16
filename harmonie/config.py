@@ -140,11 +140,6 @@ def get_settings() -> Settings:
     return _settings
 
 
-def reset_settings_for_tests() -> None:  # pragma: no cover - testing helper
-    global _settings
-    _settings = None
-
-
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------

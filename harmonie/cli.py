@@ -234,16 +234,22 @@ def cmd_similar(args: argparse.Namespace) -> int:
 def cmd_list(args: argparse.Namespace) -> int:
     settings = get_settings()
     configure_logging(settings)
-    from .db import Database, TrackFilter
+    from .api.filters import build_track_filter
+    from .db import Database
 
     db = Database(settings.db_path)
     try:
-        f = TrackFilter(
-            bpm_min=args.bpm_min,
-            bpm_max=args.bpm_max,
-            key=[args.key] if args.key else None,
-            scale=args.scale,
-        )
+        try:
+            f = build_track_filter(
+                bpm=args.bpm,
+                danceability=args.danceability,
+                loudness=args.loudness,
+                key=[args.key] if args.key else None,
+                scale=args.scale,
+            )
+        except ValueError as e:
+            print(f"list: invalid range filter: {e}", file=sys.stderr)
+            return 1
         rows, total = db.list_tracks(filter=f, limit=args.limit, offset=args.offset)
         if args.json:
             print(json.dumps({"items": rows, "total": total}, indent=2, default=str))
@@ -336,8 +342,18 @@ def build_parser() -> argparse.ArgumentParser:
     psi.set_defaults(func=cmd_similar)
 
     pl = sub.add_parser("list", help="List tracks with optional filters.")
-    pl.add_argument("--bpm-min", type=float, dest="bpm_min")
-    pl.add_argument("--bpm-max", type=float, dest="bpm_max")
+    pl.add_argument(
+        "--bpm",
+        help="BPM range (e.g. ``120..130``, ``120..``, ``..130``, or ``128``).",
+    )
+    pl.add_argument(
+        "--danceability",
+        help="Danceability range, same syntax as ``--bpm``.",
+    )
+    pl.add_argument(
+        "--loudness",
+        help="Loudness range in dB, same syntax (e.g. ``..-10``).",
+    )
     pl.add_argument("--key")
     pl.add_argument("--scale", choices=["major", "minor"])
     pl.add_argument("--limit", type=int, default=100)

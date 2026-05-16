@@ -7,7 +7,7 @@ import multiprocessing as mp
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import numpy as np
 
@@ -77,7 +77,8 @@ class JobError:
     error: str
 
 
-Result = "FullResult | DescriptorResult | JobError"  # for documentation
+# Anything a worker can produce for one job.
+WorkerResult = Union[FullResult, DescriptorResult, JobError]
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +98,7 @@ def _worker_init(backend: str) -> None:
     _extractor = get_extractor(backend)
 
 
-def _do_full(job: FullJob) -> Result:
+def _do_full(job: FullJob) -> WorkerResult:
     assert _extractor is not None
     try:
         feats: TrackFeatures = _extractor.extract(Path(job.path))
@@ -124,7 +125,7 @@ def _do_full(job: FullJob) -> Result:
         return JobError(path=job.path, error=repr(e))
 
 
-def _do_descriptors(job: DescriptorJob) -> Result:
+def _do_descriptors(job: DescriptorJob) -> WorkerResult:
     assert _extractor is not None
     try:
         descriptors, duration = _extractor.extract_descriptors(Path(job.path))
@@ -139,7 +140,7 @@ def _do_descriptors(job: DescriptorJob) -> Result:
         return JobError(path=job.path, error=repr(e))
 
 
-def _dispatch(job: FullJob | DescriptorJob) -> Result:
+def _dispatch(job: Union[FullJob, DescriptorJob]) -> WorkerResult:
     if isinstance(job, FullJob):
         return _do_full(job)
     return _do_descriptors(job)
@@ -181,19 +182,6 @@ class WorkerPool:
         self._pool.close()
         self._pool.join()
         self._pool = None
-
-    def terminate(self) -> None:
-        if self._pool is None:
-            return
-        self._pool.terminate()
-        self._pool.join()
-        self._pool = None
-
-    def __enter__(self) -> "WorkerPool":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.close()
 
 
 # ---------------------------------------------------------------------------
