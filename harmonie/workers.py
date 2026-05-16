@@ -7,7 +7,7 @@ import multiprocessing as mp
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -202,20 +202,29 @@ class WorkerPool:
 
 
 def build_jobs(
-    db, files: list[Path], *, model_name: str, force: bool
+    db, files: list[Path], *, model_name: str, force: bool,
+    on_progress: Optional[Callable[[int], None]] = None,
 ) -> tuple[list[FullJob], list[DescriptorJob], int]:
     """Decide which files need a full analysis vs. just a descriptor refresh.
 
     Returns (full_jobs, descriptor_jobs, skipped_count). Files that don't exist
     or can't be stat'd are silently dropped.
+
+    ``on_progress`` is invoked with the running count after every file. The
+    classification step issues one ``os.stat`` per file, which on slow network
+    mounts can take as long as enumeration itself; the callback lets the
+    analyzer log progress and update its public scan status without
+    block-awaiting the whole loop.
     """
     full_jobs: list[FullJob] = []
     desc_jobs: list[DescriptorJob] = []
     skipped = 0
-    for f in files:
+    for i, f in enumerate(files, start=1):
         try:
             size, mtime = file_signature(f)
         except FileNotFoundError:
+            if on_progress is not None:
+                on_progress(i)
             continue
         path_str = str(f)
         if force or db.needs_embedding(path_str, size, mtime, model_name):
@@ -224,4 +233,6 @@ def build_jobs(
             desc_jobs.append(DescriptorJob(path=path_str))
         else:
             skipped += 1
+        if on_progress is not None:
+            on_progress(i)
     return full_jobs, desc_jobs, skipped

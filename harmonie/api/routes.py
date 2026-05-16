@@ -31,8 +31,7 @@ from .schemas import (
     PlaylistBody,
     PlaylistResult,
     ScanState,
-    ServiceInfo,
-    ServiceStats,
+    ServiceStatus,
     SimilarPlaylist,
     SimilarResult,
     StyleEnumeration,
@@ -187,13 +186,13 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-@api_router.get("/info", response_model=ServiceInfo)
-def service_info(analyzer: Analyzer = Depends(get_analyzer)) -> ServiceInfo:
-    """Mostly-static service info: version, library config, model, schema
-    and descriptor versions. Safe to cache for a minute or two."""
+@api_router.get("/status", response_model=ServiceStatus)
+def get_status(analyzer: Analyzer = Depends(get_analyzer)) -> ServiceStatus:
+    """Service overview: configuration plus library counters. Live scan
+    state lives at ``GET /api/v1/scan``."""
     settings = analyzer.settings
     s = analyzer.db.stats()
-    return ServiceInfo(
+    return ServiceStatus(
         version=__version__,
         backend=settings.backend,
         embedding_dim=analyzer.embedding_dim,
@@ -202,15 +201,6 @@ def service_info(analyzer: Analyzer = Depends(get_analyzer)) -> ServiceInfo:
         db_path=s["db_path"],
         schema_version=CURRENT_SCHEMA_VERSION,
         descriptor_version=DESCRIPTOR_VERSION,
-    )
-
-
-@api_router.get("/stats", response_model=ServiceStats)
-def service_stats(analyzer: Analyzer = Depends(get_analyzer)) -> ServiceStats:
-    """Dynamic counters: track count, total duration, db size, by-model
-    breakdown. Poll-friendly."""
-    s = analyzer.db.stats()
-    return ServiceStats(
         tracks=s["tracks"],
         total_duration_sec=s["total_duration_sec"],
         db_size_bytes=s["db_size_bytes"],

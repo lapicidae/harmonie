@@ -1,13 +1,12 @@
 """Tests for the API surface — filters, paths, playlist discriminator.
 
-These exercise the renamed shapes introduced in the v1 API redesign:
+Covers:
 
 * ``120..130`` range syntax in URLs.
 * Body filter shape with nested ``{gte, lte}`` ranges.
-* ``GET /tracks/resolve`` (replaces the old ``POST /tracks/lookup``).
-* ``GET /scan`` and ``POST /scan?force=true`` (replace ``/scan/status`` and
-  the body-based ``force`` field).
-* ``/info`` and ``/stats`` split (replaces ``/status``).
+* ``GET /tracks/resolve`` for path/tag-based lookup.
+* ``GET /scan`` (live state) and ``POST /scan?force=true`` (trigger).
+* ``GET /status`` (service overview).
 * ``POST /playlists`` with explicit ``mode`` discriminator.
 """
 
@@ -213,34 +212,21 @@ class TestHealthAndInfo:
         c, _ = client
         assert c.get("/health").status_code == 200
 
-    def test_old_healthz_path_is_gone(self, client):
-        c, _ = client
-        assert c.get("/healthz").status_code == 404
-
-    def test_info_has_versions(self, client):
-        c, _ = client
-        r = c.get("/api/v1/info")
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert {"version", "schema_version", "descriptor_version"} <= body.keys()
-        # /info shouldn't carry dynamic counters.
-        assert "tracks" not in body
-        assert "by_model" not in body
-
-    def test_stats_has_counters(self, client):
+    def test_status_has_static_and_counters(self, client):
         c, db = client
-        r = c.get("/api/v1/stats")
+        r = c.get("/api/v1/status")
         assert r.status_code == 200, r.text
         body = r.json()
+        # Identity / config (was /info).
+        assert {"version", "backend", "libraries", "schema_version",
+                "descriptor_version"} <= body.keys()
+        # Counters (was /stats).
         assert body["tracks"] == db.stats()["tracks"]
         assert "by_model" in body
-        # /stats shouldn't carry static config.
-        assert "version" not in body
-        assert "libraries" not in body
-
-    def test_old_status_path_is_gone(self, client):
-        c, _ = client
-        assert c.get("/api/v1/status").status_code == 404
+        assert "total_duration_sec" in body
+        # Live scan state lives at /scan, not on /status.
+        assert "state" not in body
+        assert "phase" not in body
 
 
 class TestScanResource:
@@ -257,10 +243,6 @@ class TestScanResource:
         body = c.get("/api/v1/scan").json()
         assert "phase" in body
         assert body["phase"] == "idle"  # no scan running
-
-    def test_old_scan_status_path_is_gone(self, client):
-        c, _ = client
-        assert c.get("/api/v1/scan/status").status_code == 404
 
     def test_post_scan_accepts_force_query_param(self, client):
         """We don't actually run a scan in tests (no audio), but the route
@@ -293,15 +275,6 @@ class TestTracksList:
         c, _ = client
         r = c.get("/api/v1/tracks?bpm=..100")
         assert [it["bpm"] for it in r.json()["items"]] == [80]
-
-    def test_old_min_max_params_no_longer_recognized(self, client):
-        """``bpm_min`` and ``bpm_max`` aren't query params anymore. FastAPI
-        ignores unknown params, so this is just a smoke test that the new
-        API doesn't *honor* the old names."""
-        c, _ = client
-        r = c.get("/api/v1/tracks?bpm_min=125&bpm_max=140")
-        # Nothing was filtered — all three rows come back.
-        assert len(r.json()["items"]) == 3
 
     def test_response_uses_loudness_not_loudness_db(self, client):
         c, _ = client
@@ -345,15 +318,6 @@ class TestResolve:
         c, _ = client
         r = c.get("/api/v1/tracks/resolve", params={"path": "nope.flac"})
         assert r.status_code == 404
-
-    def test_old_lookup_post_is_gone(self, client):
-        c, _ = client
-        r = c.post(
-            "/api/v1/tracks/lookup", json={"path": "/lib/mid.flac"},
-        )
-        # 405 (Method Not Allowed) or 404 (Not Found) — either indicates the
-        # old POST endpoint no longer exists.
-        assert r.status_code in {404, 405}
 
 
 class TestPlaylistDiscriminator:

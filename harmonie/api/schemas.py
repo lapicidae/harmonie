@@ -239,9 +239,16 @@ PlaylistBody = Annotated[
 # ---------------------------------------------------------------------------
 
 
-class ServiceInfo(BaseModel):
-    """Mostly-static service info. Cache-friendly."""
+class ServiceStatus(BaseModel):
+    """Service overview: configuration plus library counters.
 
+    Returned by ``GET /api/v1/status``. Combines what was previously split
+    across ``/info`` and ``/stats``. Live scan state lives at
+    ``GET /api/v1/scan`` instead, so this endpoint is cache-friendly for
+    the ~1 minute granularity at which counters move.
+    """
+
+    # Static-ish service identity.
     version: str
     backend: str
     embedding_dim: int
@@ -251,10 +258,7 @@ class ServiceInfo(BaseModel):
     schema_version: int
     descriptor_version: int
 
-
-class ServiceStats(BaseModel):
-    """Dynamic numbers. Polls happily."""
-
+    # Library counters.
     tracks: int
     total_duration_sec: float
     db_size_bytes: int
@@ -273,10 +277,11 @@ class ScanState(BaseModel):
         "idle",
         description=(
             "Sub-phase visible while ``state == 'scanning'``: "
-            "``enumerating`` (walking the filesystem), ``extracting`` "
-            "(running TF inference and writing tracks), or ``pruning`` "
-            "(removing rows for files that disappeared). ``idle`` when "
-            "no scan is running."
+            "``enumerating`` (walking the filesystem), ``classifying`` "
+            "(stat'ing each file to decide what work it needs), "
+            "``extracting`` (running TF inference and writing tracks), "
+            "or ``pruning`` (removing rows for files that disappeared). "
+            "``idle`` when no scan is running."
         ),
     )
     started_at: Optional[float] = None

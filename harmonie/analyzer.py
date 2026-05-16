@@ -173,8 +173,27 @@ class Analyzer:
                 last_progress = now
         logger.info("discovered %d audio file(s)", len(files))
 
+        # Classify each file (one stat() each, plus DB lookup) to decide
+        # full extraction vs descriptor-only top-up vs skip. On slow mounts
+        # the per-file stat is the bottleneck here, so emit periodic
+        # progress and update self.status.phase so /api/v1/scan reflects it.
+        self.status.phase = "classifying"
+        classify_state = {"last": time.monotonic()}
+
+        def _classify_progress(n: int) -> None:
+            now = time.monotonic()
+            if now - classify_state["last"] > 10:
+                logger.info(
+                    "classifying: %d / %d file(s) checked...",
+                    n, len(files),
+                )
+                classify_state["last"] = now
+
         full_jobs, desc_jobs, skipped = build_jobs(
-            self.db, files, model_name=self.model_name, force=force
+            self.db, files,
+            model_name=self.model_name,
+            force=force,
+            on_progress=_classify_progress,
         )
         self.status.skipped = skipped
         logger.info(

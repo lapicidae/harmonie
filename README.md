@@ -155,8 +155,7 @@ All endpoints are versioned under `/api/v1/`. If `HARMONIE_API_KEY` is set, ever
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET`  | `/health` | Liveness probe |
-| `GET`  | `/api/v1/info` | Static service info: version, libraries, model, schema and descriptor versions |
-| `GET`  | `/api/v1/stats` | Dynamic counters: track count, duration, db size, by-model |
+| `GET`  | `/api/v1/status` | Service overview: version, libraries, model, versions, track counts, duration, db size, by-model |
 | `GET`  | `/api/v1/scan` | Current scan state and counters |
 | `POST` | `/api/v1/scan` | Trigger a scan now (`?force=true` to ignore mtime/size) |
 | `GET`  | `/api/v1/tracks` | List tracks (filter + pagination) |
