@@ -232,6 +232,10 @@ class ChainedPlaylistRequest:
     last track of that chunk and take the next ``chunk_size`` similars; repeat
     until the playlist has ``n`` tracks (or unique candidates run out). No
     track is ever repeated, so the chain can't loop back on itself.
+
+    ``bpm_drift`` and ``harmonic_mix`` enforce smooth transitions between
+    *consecutive* picks (each new track is compatible with the immediately
+    previous pick). They apply both within and across chunks.
     """
 
     seed_id: int
@@ -239,6 +243,8 @@ class ChainedPlaylistRequest:
     n: int = 20
     descriptor_filter: Optional[TrackFilter] = None
     include_seed: bool = False
+    bpm_drift: Optional[float] = None
+    harmonic_mix: bool = False
 
 
 def generate_chained_playlist(
@@ -265,6 +271,11 @@ def generate_chained_playlist(
     if req.descriptor_filter is not None and not req.descriptor_filter.is_empty():
         allowed_ids = db.filtered_ids(filter=req.descriptor_filter, model=model)
 
+    # Pre-fetch BPM/key metadata for every candidate. One query, used by
+    # the per-pick consecutive-transition checks below.
+    needs_meta = req.bpm_drift is not None or req.harmonic_mix
+    track_meta = db.bpm_key_by_id_for_model(model) if needs_meta else {}
+
     visited: set[int] = {req.seed_id}
     chosen: list[Match] = []
     if req.include_seed:
@@ -273,16 +284,58 @@ def generate_chained_playlist(
         )
 
     anchor_emb: np.ndarray = cached.matrix[seed_idx]
+    # `prev_*` track the immediately previous pick for consecutive-transition
+    # checks. They start at the seed (which is the implicit "previous" for
+    # the first chunk's first member, whether or not include_seed is true).
+    prev_bpm: Optional[float] = seed_row.get("bpm")
+    prev_key: Optional[str] = seed_row.get("key")
+    prev_scale: Optional[str] = seed_row.get("scale")
 
     while len(chosen) < req.n:
         scores = cached.matrix @ anchor_emb  # cached rows are normalised
         chunk: list[Match] = []
+        # Within a chunk, prev_* updates as we pick — so consecutive picks
+        # are checked against each other, not just against the chunk anchor.
+        chunk_prev_bpm = prev_bpm
+        chunk_prev_key = prev_key
+        chunk_prev_scale = prev_scale
+
         for idx in np.argsort(-scores):
             tid = cached.ids[idx]
             if tid in visited:
                 continue
             if allowed_ids is not None and tid not in allowed_ids:
                 continue
+
+            cand_bpm = cand_key = cand_scale = None
+            if needs_meta:
+                meta = track_meta.get(tid)
+                if meta is not None:
+                    cand_bpm, cand_key, cand_scale = meta
+
+            # Harmonic-mix: candidate's key must be Camelot-compatible with
+            # the previous pick. Strict — tracks without key info are
+            # excluded when this constraint is on.
+            if req.harmonic_mix:
+                if not cand_key or not cand_scale:
+                    continue
+                if chunk_prev_key and chunk_prev_scale:
+                    ok_pairs = compatible_keys_for(
+                        chunk_prev_key, chunk_prev_scale
+                    )
+                    if (cand_key, cand_scale) not in ok_pairs:
+                        continue
+
+            # bpm_drift: candidate's BPM within tolerance of previous pick.
+            # Lenient — skip the check if either side has no BPM info.
+            if req.bpm_drift is not None:
+                if (
+                    chunk_prev_bpm is not None
+                    and cand_bpm is not None
+                    and abs(cand_bpm - chunk_prev_bpm) > req.bpm_drift
+                ):
+                    continue
+
             chunk.append(
                 Match(
                     track_id=tid,
@@ -290,10 +343,14 @@ def generate_chained_playlist(
                     score=float(scores[idx]),
                 )
             )
+            chunk_prev_bpm = cand_bpm if cand_bpm is not None else chunk_prev_bpm
+            chunk_prev_key = cand_key if cand_key else chunk_prev_key
+            chunk_prev_scale = cand_scale if cand_scale else chunk_prev_scale
+
             if len(chunk) >= req.chunk_size:
                 break
         if not chunk:
-            break  # ran out of candidates
+            break  # ran out of candidates that satisfy the constraints
 
         # Don't overshoot the requested length.
         chunk = chunk[: req.n - len(chosen)]
@@ -301,7 +358,19 @@ def generate_chained_playlist(
             chosen.append(m)
             visited.add(m.track_id)
 
-        anchor_emb = cached.matrix[cached.id_to_row[chosen[-1].track_id]]
+        # Re-anchor on the last track and update the running prev_* state.
+        last_id = chosen[-1].track_id
+        anchor_emb = cached.matrix[cached.id_to_row[last_id]]
+        if needs_meta:
+            last_meta = track_meta.get(last_id)
+            if last_meta is not None:
+                last_bpm, last_key, last_scale = last_meta
+                if last_bpm is not None:
+                    prev_bpm = last_bpm
+                if last_key:
+                    prev_key = last_key
+                if last_scale:
+                    prev_scale = last_scale
 
     return chosen
 

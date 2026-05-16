@@ -232,39 +232,6 @@ def cmd_similar(args: argparse.Namespace) -> int:
         db.close()
 
 
-def cmd_chained(args: argparse.Namespace) -> int:
-    from .playlist import ChainedPlaylistRequest, generate_chained_playlist
-
-    _settings, db, index = _open_resources()
-    try:
-        req = ChainedPlaylistRequest(
-            seed_id=int(args.track_id),
-            chunk_size=args.chunk,
-            n=args.n,
-            include_seed=args.include_seed,
-        )
-        try:
-            items = generate_chained_playlist(db, index, req)
-        except KeyError as e:
-            print(str(e), file=sys.stderr)
-            return 1
-        if args.json:
-            print(
-                json.dumps(
-                    [{"track_id": m.track_id, "path": m.path, "score": m.score}
-                     for m in items],
-                    indent=2,
-                )
-            )
-            return 0
-        for i, m in enumerate(items, 1):
-            marker = "  " if (i - 1) % args.chunk else "→ "
-            print(f"{marker}{i:>3}. {m.score:.4f}  [{m.track_id}] {m.path}")
-        return 0
-    finally:
-        db.close()
-
-
 def cmd_list(args: argparse.Namespace) -> int:
     settings = get_settings()
     configure_logging(settings)
@@ -368,17 +335,6 @@ def build_parser() -> argparse.ArgumentParser:
     psi.add_argument("-n", type=int, default=10)
     psi.add_argument("--json", action="store_true")
     psi.set_defaults(func=cmd_similar)
-
-    pch = sub.add_parser(
-        "chained",
-        help="Walk top-N similar in chunks; re-anchor on the last track each chunk.",
-    )
-    pch.add_argument("track_id", help="Seed track ID.")
-    pch.add_argument("--chunk", type=int, default=5, help="Tracks per chunk.")
-    pch.add_argument("-n", type=int, default=20, help="Total playlist length.")
-    pch.add_argument("--include-seed", action="store_true")
-    pch.add_argument("--json", action="store_true")
-    pch.set_defaults(func=cmd_chained)
 
     pl = sub.add_parser("list", help="List tracks with optional filters.")
     pl.add_argument("--bpm-min", type=float, dest="bpm_min")

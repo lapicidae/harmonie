@@ -23,21 +23,19 @@ from ..playlist import (
 )
 from ..similarity import find_similar_to_id
 from .schemas import (
-    ChainedPlaylistBody,
     FilterParams,
     MatchOut,
+    PlaylistBody,
     PlaylistResult,
     ScanStatusOut,
     ScanTriggerBody,
     ScanTriggerResult,
     ServiceStatus,
-    SimilarPlaylistBody,
     SimilarResult,
     Track,
     TrackList,
     TrackLookupBody,
     TrackSummary,
-    VibePlaylistBody,
 )
 
 logger = logging.getLogger("harmonie.api")
@@ -291,64 +289,70 @@ def similar_to(
 # ---- playlists -----------------------------------------------------------
 
 
-@api_router.post("/playlists/similar", response_model=PlaylistResult)
-def similar_playlist(
-    body: SimilarPlaylistBody,
+@api_router.post("/playlists", response_model=PlaylistResult)
+def make_playlist(
+    body: PlaylistBody,
     db: Database = Depends(get_db),
     index: EmbeddingIndex = Depends(get_index),
 ) -> PlaylistResult:
-    req = SimilarPlaylistRequest(
-        seed_ids=body.seed_ids,
-        n=body.n,
-        bpm_drift=body.bpm_drift,
-        harmonic_mix=body.harmonic_mix,
-        descriptor_filter=_filter_from_params(body.filter),
-        include_seeds=body.include_seeds,
-    )
+    """Build a playlist. The mode is implicit from the parameters:
+
+    * No seeds → descriptor-driven (filters + targets + shuffle).
+    * Seeds + drift=true → drifting walk anchored on the previous selection.
+    * Seeds + drift=false → similarity-anchored on the seed centroid, with
+      optional smooth-transition rules (bpm_tolerance, key_compatible).
+    """
+    descriptor_filter = _filter_from_params(body.filter)
+
     try:
-        items = generate_similar_playlist(db, index, req)
+        if not body.seeds:
+            # Descriptor-driven mode.
+            items = generate_vibe_playlist(
+                db,
+                VibePlaylistRequest(
+                    n=body.n,
+                    descriptor_filter=descriptor_filter,
+                    target_bpm=body.target_bpm,
+                    target_danceability=body.target_danceability,
+                    shuffle=body.shuffle,
+                    seed=body.rng_seed,
+                ),
+            )
+        elif body.drift:
+            if len(body.seeds) != 1:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "drift mode requires exactly one seed",
+                )
+            items = generate_chained_playlist(
+                db, index,
+                ChainedPlaylistRequest(
+                    seed_id=body.seeds[0],
+                    chunk_size=body.chunk_size,
+                    n=body.n,
+                    descriptor_filter=descriptor_filter,
+                    include_seed=body.include_seeds,
+                    bpm_drift=body.bpm_tolerance,
+                    harmonic_mix=body.key_compatible,
+                ),
+            )
+        else:
+            items = generate_similar_playlist(
+                db, index,
+                SimilarPlaylistRequest(
+                    seed_ids=body.seeds,
+                    n=body.n,
+                    bpm_drift=body.bpm_tolerance,
+                    harmonic_mix=body.key_compatible,
+                    descriptor_filter=descriptor_filter,
+                    include_seeds=body.include_seeds,
+                ),
+            )
     except KeyError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
-    return PlaylistResult(items=_enrich_matches(db, items))
 
-
-@api_router.post("/playlists/vibe", response_model=PlaylistResult)
-def vibe_playlist(
-    body: VibePlaylistBody, db: Database = Depends(get_db)
-) -> PlaylistResult:
-    req = VibePlaylistRequest(
-        n=body.n,
-        descriptor_filter=_filter_from_params(body.filter),
-        target_bpm=body.target_bpm,
-        target_danceability=body.target_danceability,
-        shuffle=body.shuffle,
-        seed=body.seed,
-    )
-    items = generate_vibe_playlist(db, req)
-    return PlaylistResult(items=_enrich_matches(db, items))
-
-
-@api_router.post("/playlists/chained", response_model=PlaylistResult)
-def chained_playlist(
-    body: ChainedPlaylistBody,
-    db: Database = Depends(get_db),
-    index: EmbeddingIndex = Depends(get_index),
-) -> PlaylistResult:
-    req = ChainedPlaylistRequest(
-        seed_id=body.seed_id,
-        chunk_size=body.chunk_size,
-        n=body.n,
-        descriptor_filter=_filter_from_params(body.filter),
-        include_seed=body.include_seed,
-    )
-    try:
-        items = generate_chained_playlist(db, index, req)
-    except KeyError as e:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
-    except ValueError as e:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     return PlaylistResult(items=_enrich_matches(db, items))
 
 

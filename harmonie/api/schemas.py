@@ -97,30 +97,122 @@ class SimilarResult(BaseModel):
     matches: list[MatchOut]
 
 
-class SimilarPlaylistBody(BaseModel):
-    seed_ids: list[int] = Field(..., min_length=1)
-    n: int = Field(20, ge=1, le=500)
-    bpm_drift: Optional[float] = Field(None, ge=0)
-    harmonic_mix: bool = False
-    include_seeds: bool = False
-    filter: Optional[FilterParams] = None
+class PlaylistBody(BaseModel):
+    """Single endpoint for all playlist generation. The mode is implicit
+    from the parameters you set — there's no separate "mode" enum to choose.
 
+    Modes:
 
-class VibePlaylistBody(BaseModel):
-    n: int = Field(20, ge=1, le=500)
-    target_bpm: Optional[float] = Field(None, gt=0)
-    target_danceability: Optional[float] = Field(None, ge=0)
-    shuffle: bool = True
-    seed: Optional[int] = None
-    filter: Optional[FilterParams] = None
+    * **No seeds** → descriptor-driven playlist. ``filter`` constrains the
+      candidate pool; ``target_bpm`` / ``target_danceability`` pull tracks
+      toward those values; ``shuffle`` randomises the order.
 
+    * **One or more seeds** → similarity-driven playlist. The seed track(s)
+      anchor the playlist; the result stays in the same neighbourhood of
+      embedding space. ``bpm_tolerance`` and ``key_compatible`` add
+      smooth-transition constraints.
 
-class ChainedPlaylistBody(BaseModel):
-    seed_id: int
-    chunk_size: int = Field(5, ge=1, le=100)
-    n: int = Field(20, ge=1, le=500)
-    include_seed: bool = False
-    filter: Optional[FilterParams] = None
+    * **One seed + drift=true** → "drifting" playlist. Each new track's
+      anchor is the previous selection, so the playlist gradually walks
+      away from the seed in style. Useful for long mixes that evolve.
+    """
+
+    n: int = Field(20, ge=1, le=500, description="Number of tracks to return.")
+
+    # ---- anchoring ---------------------------------------------------
+    seeds: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Track IDs to anchor on. With seeds the playlist is built from "
+            "cosine similarity in the embedding space. Without seeds the "
+            "playlist is built from descriptor targets and filters."
+        ),
+    )
+    drift: bool = Field(
+        False,
+        description=(
+            "Walk away from the seed track instead of staying near it. "
+            "Each new selection becomes the anchor for the next, so the "
+            "playlist drifts in style. Requires exactly one seed."
+        ),
+    )
+    chunk_size: int = Field(
+        5,
+        ge=1,
+        le=100,
+        description=(
+            "How many tracks to take per anchor in drift mode. The "
+            "playlist takes the top-N most similar to the seed, then "
+            "re-anchors on the last of those and takes its top-N, and so "
+            "on. Larger chunks stay closer to the seed; smaller chunks "
+            "drift faster. Only used when drift is true."
+        ),
+    )
+
+    # ---- candidate filter --------------------------------------------
+    filter: Optional[FilterParams] = Field(
+        None,
+        description=(
+            "Hard constraints on candidate tracks (BPM range, key, "
+            "scale, danceability range, loudness range)."
+        ),
+    )
+
+    # ---- smooth-transition rules (similarity modes only) -------------
+    bpm_tolerance: Optional[float] = Field(
+        None,
+        ge=0,
+        description=(
+            "Maximum BPM gap allowed between consecutive tracks. Honored in "
+            "both default and drift modes when seeds are provided."
+        ),
+    )
+    key_compatible: bool = Field(
+        False,
+        description=(
+            "Restrict candidates to keys that mix harmonically with the "
+            "previous track (Camelot wheel: same key, ±1 number on the "
+            "wheel, or parallel mode). Honored in both default and drift "
+            "modes when seeds are provided. In default mode the constraint "
+            "is anchored on the first seed; in drift mode it follows the "
+            "running anchor."
+        ),
+    )
+
+    # ---- descriptor targets (descriptor-only mode) -------------------
+    target_bpm: Optional[float] = Field(
+        None,
+        gt=0,
+        description=(
+            "Rank candidates by closeness to this BPM. Only applied when "
+            "seeds is empty."
+        ),
+    )
+    target_danceability: Optional[float] = Field(
+        None,
+        ge=0,
+        description=(
+            "Rank candidates by closeness to this danceability score. Only "
+            "applied when seeds is empty."
+        ),
+    )
+
+    # ---- output --------------------------------------------------------
+    include_seeds: bool = Field(
+        False,
+        description="Include the seed tracks in the result.",
+    )
+    shuffle: bool = Field(
+        True,
+        description=(
+            "Shuffle the result. Only applied when seeds is empty — "
+            "similarity- and drift-driven playlists are always ordered."
+        ),
+    )
+    rng_seed: Optional[int] = Field(
+        None,
+        description="RNG seed for reproducible shuffling.",
+    )
 
 
 class TrackLookupBody(BaseModel):

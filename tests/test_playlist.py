@@ -275,3 +275,103 @@ def test_chained_include_seed(make_db, fake_descriptors):
     assert items[0].track_id == seed
     ids = [m.track_id for m in items]
     assert len(set(ids)) == len(ids)
+
+
+def test_chained_respects_bpm_tolerance(make_db, fake_descriptors):
+    """drift mode: consecutive picks (incl. seed→first) must stay within
+    bpm_tolerance of the previous track."""
+    db, index = make_db()
+    rng = np.random.default_rng(11)
+    seed_emb = rng.standard_normal(8).astype(np.float32)
+    seed = _add(db, "/seed", seed_emb, fake_descriptors(bpm=128))
+    # 30 tracks with BPMs spread out wildly so the constraint actually bites.
+    for i in range(30):
+        v = seed_emb + 0.1 * rng.standard_normal(8).astype(np.float32)
+        bpm = 60 + i * 5  # 60..205
+        _add(db, f"/n{i}", v, fake_descriptors(bpm=bpm))
+
+    items = generate_chained_playlist(
+        db, index,
+        ChainedPlaylistRequest(
+            seed_id=seed, chunk_size=3, n=10, bpm_drift=6,
+        ),
+    )
+    assert len(items) > 0
+    bpms = [db.get_track_by_id(m.track_id)["bpm"] for m in items]
+    prev = 128  # seed BPM
+    for b in bpms:
+        assert abs(b - prev) <= 6, f"gap {b}-{prev} exceeds tolerance"
+        prev = b
+
+
+def test_chained_respects_key_compatible(make_db, fake_descriptors):
+    """drift mode: every consecutive transition is harmonically compatible."""
+    from harmonie.playlist import compatible_keys_for
+
+    db, index = make_db()
+    rng = np.random.default_rng(22)
+    seed_emb = rng.standard_normal(4).astype(np.float32)
+    seed = _add(
+        db, "/seed", seed_emb, fake_descriptors(key="A", scale="minor"),
+    )
+    # Mix compatible (A minor, C major, D minor, E minor) and incompatible
+    # (F# major, B minor in 10A) keys.
+    keys_to_use = [
+        ("A", "minor"), ("C", "major"), ("D", "minor"), ("E", "minor"),
+        ("F#", "major"), ("F", "minor"), ("G", "major"), ("Bb", "major"),
+    ]
+    for i in range(40):
+        v = seed_emb + 0.1 * rng.standard_normal(4).astype(np.float32)
+        k, s = keys_to_use[i % len(keys_to_use)]
+        _add(db, f"/n{i}", v, fake_descriptors(key=k, scale=s))
+
+    items = generate_chained_playlist(
+        db, index,
+        ChainedPlaylistRequest(
+            seed_id=seed, chunk_size=4, n=12, harmonic_mix=True,
+        ),
+    )
+    assert len(items) > 0
+    prev_key, prev_scale = "A", "minor"
+    for m in items:
+        row = db.get_track_by_id(m.track_id)
+        ok = compatible_keys_for(prev_key, prev_scale)
+        assert (row["key"], row["scale"]) in ok, (
+            f"track {row['key']} {row['scale']} not compatible with "
+            f"previous {prev_key} {prev_scale}"
+        )
+        prev_key, prev_scale = row["key"], row["scale"]
+
+
+def test_chained_combines_bpm_and_key_constraints(make_db, fake_descriptors):
+    """Both constraints applied at once — every consecutive pair must
+    satisfy both."""
+    from harmonie.playlist import compatible_keys_for
+
+    db, index = make_db()
+    rng = np.random.default_rng(33)
+    seed_emb = rng.standard_normal(4).astype(np.float32)
+    seed = _add(
+        db, "/seed", seed_emb,
+        fake_descriptors(key="A", scale="minor", bpm=128),
+    )
+    keys = [("A", "minor"), ("C", "major"), ("D", "minor"), ("E", "minor")]
+    for i in range(20):
+        v = seed_emb + 0.1 * rng.standard_normal(4).astype(np.float32)
+        k, s = keys[i % len(keys)]
+        _add(db, f"/n{i}", v, fake_descriptors(key=k, scale=s, bpm=124 + (i % 5)))
+
+    items = generate_chained_playlist(
+        db, index,
+        ChainedPlaylistRequest(
+            seed_id=seed, chunk_size=3, n=8,
+            bpm_drift=4, harmonic_mix=True,
+        ),
+    )
+    prev = (128, "A", "minor")
+    for m in items:
+        row = db.get_track_by_id(m.track_id)
+        bpm, key, scale = row["bpm"], row["key"], row["scale"]
+        assert abs(bpm - prev[0]) <= 4
+        assert (key, scale) in compatible_keys_for(prev[1], prev[2])
+        prev = (bpm, key, scale)

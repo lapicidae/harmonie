@@ -76,9 +76,7 @@ All endpoints are versioned under `/api/v1/`. If `HARMONIE_API_KEY` is set, ever
 | `GET`  | `/api/v1/tracks/{id}` | Full track record |
 | `GET`  | `/api/v1/tracks/{id}/similar` | Top-N similar tracks |
 | `POST` | `/api/v1/tracks/lookup` | Find a single track by `path` and/or tags |
-| `POST` | `/api/v1/playlists/similar` | N-track playlist from seeds, with BPM/key constraints |
-| `POST` | `/api/v1/playlists/chained` | Walk top-N similar in chunks, re-anchoring on the last track each chunk |
-| `POST` | `/api/v1/playlists/vibe` | N-track playlist from descriptor targets |
+| `POST` | `/api/v1/playlists` | Build a playlist (mode implicit from parameters) |
 
 OpenAPI docs are served at `/docs` (Swagger UI) and `/openapi.json`.
 
@@ -120,22 +118,55 @@ For playlist endpoints the same set is in the body under `filter`.
 
 ### Playlists
 
+One endpoint, `POST /api/v1/playlists`, builds every kind of playlist. The mode is implicit from the parameters you set:
+
+* **No `seeds`** → descriptor-driven. The candidate pool is whatever passes the `filter`; results are sorted by closeness to `target_bpm` / `target_danceability` and optionally shuffled.
+* **`seeds` set, `drift: false`** (default) → similarity-driven. The seeds anchor the playlist; results stay near them in embedding space. `bpm_tolerance` and `key_compatible` add smooth-transition rules.
+* **One seed, `drift: true`** → drifting walk. Take the top `chunk_size` tracks similar to the seed, then re-anchor on the *last* of those and take its top `chunk_size`, and so on until the playlist hits `n`. Larger `chunk_size` stays closer to the seed; smaller `chunk_size` drifts faster. No track ever appears twice.
+
+Parameters:
+
+| Field | Type | Purpose |
+| --- | --- | --- |
+| `n` | int (1–500) | How many tracks to return. Default 20. |
+| `seeds` | list[int] | Track IDs to anchor on. Empty = descriptor-driven. |
+| `drift` | bool | Walk away from the seed instead of staying near it. Requires exactly one seed. |
+| `chunk_size` | int (1–100) | Tracks per anchor in drift mode. Default 5. |
+| `filter` | object | Hard descriptor constraints — same shape as `/tracks` query params. |
+| `bpm_tolerance` | float | Max BPM gap between consecutive tracks. Seeds-only. |
+| `key_compatible` | bool | Restrict to keys that mix harmonically with the first seed (Camelot wheel: same key, ±1 number, parallel mode). Seeds-only. |
+| `target_bpm` | float | Pull tracks toward this BPM when ranking. No-seeds-only. |
+| `target_danceability` | float | Pull tracks toward this danceability score when ranking. No-seeds-only. |
+| `include_seeds` | bool | Include seed tracks in the result. |
+| `shuffle` | bool | Randomise order. No-seeds-only. Default true. |
+| `rng_seed` | int | Reproducible shuffle. |
+
+Examples:
+
 ```bash
-# Similar to a seed, harmonically compatible (Camelot wheel), max ±5 BPM jump.
-curl -X POST http://localhost:8842/api/v1/playlists/similar \
+# Similar to track 1, max ±5 BPM jumps, harmonically compatible keys.
+curl -X POST http://localhost:8842/api/v1/playlists \
   -H 'content-type: application/json' \
-  -d '{"seed_ids": [1], "n": 20, "bpm_drift": 5, "harmonic_mix": true}'
+  -d '{
+    "seeds": [1],
+    "n": 20,
+    "bpm_tolerance": 5,
+    "key_compatible": true
+  }'
 
-# Vibe: 128 BPM target, danceability >= 1.5, 30 tracks.
-curl -X POST http://localhost:8842/api/v1/playlists/vibe \
+# Drift away from track 1 in chunks of 3, total length 25.
+curl -X POST http://localhost:8842/api/v1/playlists \
   -H 'content-type: application/json' \
-  -d '{"n": 30, "target_bpm": 128, "filter": {"danceability_min": 1.5}}'
+  -d '{"seeds": [1], "drift": true, "chunk_size": 3, "n": 25}'
 
-# Chained walk: 5 similar to the seed, then 5 similar to that chunk's last
-# track, repeat until 25 tracks. No track ever appears twice.
-curl -X POST http://localhost:8842/api/v1/playlists/chained \
+# Descriptor-driven: 30 tracks at ~128 BPM, danceability ≥ 1.5.
+curl -X POST http://localhost:8842/api/v1/playlists \
   -H 'content-type: application/json' \
-  -d '{"seed_id": 1, "chunk_size": 5, "n": 25}'
+  -d '{
+    "n": 30,
+    "target_bpm": 128,
+    "filter": {"danceability_min": 1.5}
+  }'
 ```
 
 ## Configuration

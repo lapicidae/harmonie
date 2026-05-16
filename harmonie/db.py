@@ -506,6 +506,18 @@ class Database:
         )
         return {int(r["id"]): r["bpm"] for r in cur}
 
+    def bpm_key_by_id_for_model(
+        self, model: str
+    ) -> dict[int, tuple[Optional[float], Optional[str], Optional[str]]]:
+        """Return ``{track_id: (bpm, key, scale)}`` for one model. Used by the
+        chained playlist generator to check each candidate's BPM and key
+        against the previous pick without re-querying the DB per candidate."""
+        cur = self._conn.execute(
+            "SELECT id, bpm, key, scale FROM tracks WHERE model = ?",
+            (model,),
+        )
+        return {int(r["id"]): (r["bpm"], r["key"], r["scale"]) for r in cur}
+
     def needs_embedding(self, path: str, size: int, mtime: float, model: str) -> bool:
         meta = self.get_track_by_path(path)
         if meta is None:
