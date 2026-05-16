@@ -96,9 +96,9 @@ The image is amd64-only because Essentia ships only manylinux x86_64 wheels on P
 | `~/harmonie-data` | `/data` | SQLite DB. Persists across container restarts. |
 | `~/harmonie-models` | `/root/.cache/harmonie` | Cached Essentia models. Without this volume, the ~25 MB models redownload every time the container is recreated. |
 
-### Common environment variables
+### Environment variables
 
-Add `-e` flags to the `docker run` command above:
+Add `-e` flags to the `docker run` command above. See [Configuration](#configuration) for the full list:
 
 ```bash
 docker run -d --name harmonie --restart unless-stopped \
@@ -109,23 +109,8 @@ docker run -d --name harmonie --restart unless-stopped \
   -v ~/harmonie-models:/root/.cache/harmonie \
   -e HARMONIE_API_KEY=change-me \
   -e HARMONIE_WORKERS=4 \
-  -e HARMONIE_SCAN_INTERVAL_HOURS=6 \
-  -e HARMONIE_LOG_LEVEL=INFO \
   ghcr.io/mxschll/harmonie:latest
 ```
-
-| Variable | Default | What it does |
-| --- | --- | --- |
-| `HARMONIE_API_KEY` | unset (no auth) | If set, every authenticated request must include `X-API-Key: <value>`. |
-| `HARMONIE_WORKERS` | CPU count | Analysis worker processes. Cap to ~4 on shared hosts. |
-| `HARMONIE_SCAN_INTERVAL_HOURS` | `6` | Periodic rescan interval. `0` disables; the service then only scans on `POST /scan`. |
-| `HARMONIE_SCAN_ON_STARTUP` | `true` | Run a scan immediately on container boot. |
-| `HARMONIE_LOG_LEVEL` | `INFO` | One of `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
-| `HARMONIE_LOG_JSON` | `false` | Emit one-line JSON logs (good for log shippers). |
-| `HARMONIE_BACKEND` | `effnet` | `effnet` (with TensorFlow) or `musicextractor` (smaller, no TF). |
-| `HARMONIE_LIBRARIES` | `/music` | Comma- or colon-separated list of paths to scan. Override if you mount multiple library volumes. |
-
-The full list lives in [Configuration](#configuration).
 
 ### Multiple libraries
 
