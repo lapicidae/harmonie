@@ -18,7 +18,7 @@ from typing import Optional
 
 from .config import Settings
 from .db import Database
-from .features import get_extractor
+from .features import get_backend_info
 from .index import EmbeddingIndex
 from .scan import iter_audio_files, split_library_path
 from .workers import (
@@ -88,12 +88,12 @@ class Analyzer:
         self.settings = settings
         self.db = Database(settings.db_path)
         self.index = EmbeddingIndex(self.db)
-        # Resolve the model name without holding the model itself in this
-        # process — workers will load it independently.
-        sample = get_extractor(settings.backend)
-        self.model_name: str = sample.name
-        self.embedding_dim: int = sample.dim
-        del sample
+        # Pull the backend's static metadata without importing essentia
+        # or loading the TF graph. Workers load the actual model on first
+        # extraction.
+        info = get_backend_info(settings.backend)
+        self.model_name: str = info.name
+        self.embedding_dim: int = info.dim
         self.pool: Optional[WorkerPool] = None
         self.status = ScanStatus()
         self._scan_lock = threading.Lock()

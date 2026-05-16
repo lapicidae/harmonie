@@ -557,6 +557,39 @@ class MusicExtractorBackend:
 Extractor = EffnetExtractor  # for type hints; both classes have the same API
 
 
+@dataclass(frozen=True)
+class BackendInfo:
+    """Lightweight metadata about a backend.
+
+    Used by callers (the API server, the analyzer's status response) that
+    need the model name and embedding dimensionality but don't need an
+    actual extractor instance. Reading these doesn't import essentia,
+    download model files, or load TensorFlow.
+    """
+
+    name: str
+    dim: int
+
+
+def get_backend_info(backend: str = "effnet") -> BackendInfo:
+    """Return :class:`BackendInfo` for the given backend without
+    instantiating the extractor.
+
+    The TF graph and model files are loaded only inside worker processes,
+    on first scan. Calling this from the FastAPI lifespan (or anywhere
+    in the main process) is free.
+    """
+    backend = backend.lower()
+    if backend in ("effnet", "discogs-effnet", "tf"):
+        return BackendInfo(name=EffnetExtractor.name, dim=EFFNET_EMBEDDING_DIM)
+    if backend in ("musicextractor", "classic", "music"):
+        return BackendInfo(
+            name=MusicExtractorBackend.name,
+            dim=sum(n for _, n in _MUSIC_EXTRACTOR_KEYS),
+        )
+    raise ValueError(f"unknown backend: {backend}")
+
+
 def get_extractor(backend: str = "effnet"):
     backend = backend.lower()
     if backend in ("effnet", "discogs-effnet", "tf"):
