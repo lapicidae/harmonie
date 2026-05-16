@@ -173,35 +173,80 @@ curl 'http://localhost:8842/api/v1/styles?style_min=0.5'
 
 `POST /api/v1/playlists` builds every kind of playlist. The body has a required `mode` field that selects the strategy. Each mode has its own validated schema — there are no hidden parameter coupling rules.
 
-**Mode `similar`** — anchored on the seeds' embedding centroid:
+**Picking a mode:**
+
+| Use case | Mode |
+| --- | --- |
+| "More tracks like this one" | `similar` with one seed |
+| "More like these few" | `similar` with multiple seeds |
+| "An endless radio" | `similar`, then re-seed with the last few items |
+| "A long mix that gradually changes style" | `drift` |
+| "Tracks at ~128 BPM, danceable, electronic, shuffled" | `vibe` with `filter` + `target` |
+
+#### Mode `similar` — track radio
+
+The seeds anchor the playlist; results stay close to their embedding centroid. This is the "Track Radio" surface.
 
 ```bash
+# Minimum: 20 tracks similar to track 42.
+curl -X POST http://localhost:8842/api/v1/playlists \
+  -H 'content-type: application/json' \
+  -d '{"mode": "similar", "seeds": [42]}'
+
+# Tighter: multi-seed, smooth transitions, hard filter, include the seeds.
 curl -X POST http://localhost:8842/api/v1/playlists \
   -H 'content-type: application/json' \
   -d '{
     "mode": "similar",
-    "n": 20,
-    "seeds": [1, 5, 12],
+    "seeds": [42, 117],
+    "n": 30,
     "smooth_transitions": { "bpm_tolerance": 5, "key_compatible": true },
-    "filter": { "bpm": { "gte": 120 } }
+    "filter": { "bpm": { "gte": 120, "lte": 140 }, "style_min": 0.3 },
+    "include_seeds": true
   }'
 ```
 
-**Mode `drift`** — chunked walk away from one seed:
+**Endless radio** — the endpoint returns a fixed `n`. To keep going, re-seed from the tail of the previous response:
+
+```bash
+seed=$(curl -sX POST http://localhost:8842/api/v1/playlists \
+  -H 'content-type: application/json' \
+  -d '{"mode":"similar","seeds":[42],"n":20}' \
+  | jq '[.items[-3:][].track_id]')
+# Next batch is "music like the last 3 tracks of the previous batch."
+curl -X POST http://localhost:8842/api/v1/playlists \
+  -H 'content-type: application/json' \
+  -d "{\"mode\":\"similar\",\"seeds\":$seed,\"n\":20}"
+```
+
+#### Mode `drift` — chunked walk
+
+`drift` walks gradually away from one seed. Each chunk of `chunk_size` tracks is anchored on the last pick, so the playlist evolves in style as it goes:
 
 ```bash
 curl -X POST http://localhost:8842/api/v1/playlists \
   -H 'content-type: application/json' \
   -d '{
     "mode": "drift",
+    "seeds": [42],
     "n": 30,
-    "seeds": [1],
     "chunk_size": 5,
     "smooth_transitions": { "key_compatible": true }
   }'
 ```
 
-**Mode `vibe`** — descriptor-driven, no seeds:
+Tuning intuition for `chunk_size`:
+
+* `1` — every new track becomes the next anchor. Drifts the fastest.
+* `5` (default) — moderate. Re-anchors every five picks. Signature drift behaviour.
+* `20` — re-anchors rarely. Stays close to the seed for most of the playlist.
+* `n` (= total length) — equivalent to `similar` mode (no re-anchoring at all).
+
+You'll see the drift visibly: scores typically jump at chunk boundaries because the first track of each chunk is measured against a *new* anchor, not the original seed.
+
+#### Mode `vibe` — descriptor-driven
+
+No seeds. The `filter` block narrows the candidate pool; the `target` block ranks within it by closeness:
 
 ```bash
 curl -X POST http://localhost:8842/api/v1/playlists \
@@ -216,21 +261,26 @@ curl -X POST http://localhost:8842/api/v1/playlists \
   }'
 ```
 
-| Field | Modes | Purpose |
-| --- | --- | --- |
-| `n` | all | Number of tracks. 1–500. Default 20. |
-| `filter` | all | Hard candidate-pool constraints — same shape as the URL filter, in body form. |
-| `seeds` | similar, drift | Track IDs to anchor on. `drift` requires exactly one. |
-| `smooth_transitions.bpm_tolerance` | similar, drift | Max BPM gap between consecutive picks. |
-| `smooth_transitions.key_compatible` | similar, drift | Restrict consecutive picks to harmonically compatible keys (Camelot wheel: same key, ±1 number, parallel mode). |
-| `chunk_size` | drift | Tracks per anchor before re-anchoring on the last pick. 1–100. Default 5. Larger = stays closer to the seed; smaller = drifts faster. |
-| `include_seeds` | similar, drift | Include the seed track(s) in the result. |
-| `target.bpm` | vibe | Soft preference — tracks closer to this BPM rank higher. |
-| `target.danceability` | vibe | Soft preference for closeness to this danceability score. |
-| `shuffle` | vibe | Randomise the (post-target) pool before truncation. Default true. |
-| `rng_seed` | vibe | Seed for reproducible shuffling. |
+#### Body field reference
 
-Examples:
+| Field | Modes | Default | Range | Purpose |
+| --- | --- | --- | --- | --- |
+| `mode` | all | required | `similar` \| `drift` \| `vibe` | Strategy selector. |
+| `n` | all | `20` | 1–500 | Number of tracks to return. |
+| `filter` | all | none | — | Hard candidate-pool constraints — same shape as the URL filter, in body form. |
+| `seeds` | similar, drift | required | similar: ≥1, drift: exactly 1 | Track IDs to anchor on. |
+| `include_seeds` | similar, drift | `false` | — | Include the seed track(s) in the result. |
+| `smooth_transitions.bpm_tolerance` | similar, drift | `null` | ≥0 | Max BPM gap between consecutive picks. Lenient on missing BPMs. |
+| `smooth_transitions.key_compatible` | similar, drift | `false` | — | Restrict consecutive picks to harmonically compatible keys (Camelot wheel: same key, ±1 number, parallel mode). Strict — tracks without key info are dropped. |
+| `chunk_size` | drift | `5` | 1–100 | Tracks per anchor before re-anchoring on the last pick. Larger = stays closer to the seed; smaller = drifts faster. |
+| `target.bpm` | vibe | `null` | >0 | Soft preference — tracks closer to this BPM rank higher. |
+| `target.danceability` | vibe | `null` | ≥0 | Soft preference for closeness to this danceability score. |
+| `shuffle` | vibe | `true` | — | Randomise the (post-target) pool before truncation. |
+| `rng_seed` | vibe | `null` | — | Seed for reproducible shuffling. `null` = fresh randomness each call. |
+
+If you call `POST /playlists` with the bare minimum body for `similar`/`drift` (`mode` and `seeds`), you get 20 tracks, no BPM/key constraints, seeds excluded from output, and (for drift) chunks of 5. That's a sensible starting point — add the smooth-transition and filter blocks when the surface needs them.
+
+### Cross-cutting examples
 
 ```bash
 # Trigger a scan and watch its progress.
@@ -239,7 +289,7 @@ while [ "$(curl -sS http://localhost:8842/api/v1/scan | jq -r .state)" != "idle"
   sleep 5
 done
 
-# Find every Hard Techno track at 140+ BPM, sorted by BPM descending.
+# Find every Hard Techno track at 140+ BPM, sorted by BPM ascending.
 curl --get http://localhost:8842/api/v1/tracks \
   --data-urlencode 'style=Electronic---Hard Techno' \
   --data 'bpm=140..' --data 'order_by=bpm'
