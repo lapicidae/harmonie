@@ -151,13 +151,84 @@ def test_migration_001_columns_match_db_layer_expectations(tmp_path: Path):
     finally:
         conn.close()
     expected = {
-        "id", "path", "library_root", "relative_path",
-        "size", "mtime", "duration",
-        "embedding", "embedding_dim", "model",
+        "id",
+        "path",
+        "library_root",
+        "relative_path",
+        "size",
+        "mtime",
+        "duration",
+        "embedding",
+        "embedding_dim",
+        "model",
         "descriptor_version",
-        "bpm", "bpm_confidence", "key", "scale", "key_strength",
-        "loudness", "danceability", "onset_rate",
-        "artist", "album", "title", "track_number",
+        "bpm",
+        "bpm_confidence",
+        "key",
+        "scale",
+        "key_strength",
+        "loudness",
+        "danceability",
+        "onset_rate",
+        "artist",
+        "album",
+        "title",
+        "track_number",
         "analyzed_at",
     }
     assert expected <= cols, f"missing columns: {expected - cols}"
+
+
+# ---------------------------------------------------------------------------
+# Migration 002: scan history
+# ---------------------------------------------------------------------------
+
+
+def test_migration_002_creates_scans_table(tmp_path: Path):
+    """The ``scans`` table exists with all expected columns."""
+    conn = sqlite3.connect(tmp_path / "scans.db")
+    try:
+        run_migrations(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(scans)")}
+    finally:
+        conn.close()
+    expected = {
+        "id",
+        "started_at",
+        "finished_at",
+        "duration_sec",
+        "discovered",
+        "full",
+        "descriptors_only",
+        "skipped",
+        "failed",
+        "removed",
+        "workers",
+        "backend",
+        "model",
+        "forced",
+        "harmonie_version",
+        "descriptor_version",
+        "state",
+        "last_error",
+    }
+    assert expected <= cols, f"missing columns: {expected - cols}"
+
+
+def test_migration_002_creates_scan_failures_table(tmp_path: Path):
+    conn = sqlite3.connect(tmp_path / "fails.db")
+    try:
+        run_migrations(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(scan_failures)")}
+        idxs = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND tbl_name='scan_failures'"
+            )
+        }
+    finally:
+        conn.close()
+    assert {"scan_id", "path", "error", "failed_at", "size", "mtime"} <= cols
+    assert "idx_scan_failures_scan_id" in idxs
+    assert "idx_scan_failures_path" in idxs

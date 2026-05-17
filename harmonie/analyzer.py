@@ -8,11 +8,11 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
+from . import __version__
 from .config import Settings
 from .db import Database
-from .features import get_backend_info
+from .features import DESCRIPTOR_VERSION, get_backend_info
 from .index import EmbeddingIndex
 from .scan import iter_audio_files, split_library_path
 from .workers import (
@@ -35,10 +35,10 @@ logger = logging.getLogger("harmonie.analyzer")
 class ScanStatus:
     state: str = "idle"  # idle | scanning
     phase: str = "idle"  # idle | enumerating | classifying | extracting | pruning
-    started_at: Optional[float] = None
-    finished_at: Optional[float] = None
-    last_duration_sec: Optional[float] = None
-    last_error: Optional[str] = None
+    started_at: float | None = None
+    finished_at: float | None = None
+    last_duration_sec: float | None = None
+    last_error: str | None = None
 
     discovered: int = 0
     full: int = 0
@@ -48,6 +48,9 @@ class ScanStatus:
     removed: int = 0
 
     failures: list[tuple[str, str]] = field(default_factory=list)
+    # Persistent scan-history row id, set when _run_scan starts. None
+    # outside of an active scan.
+    scan_id: int | None = None
 
     def snapshot(self) -> dict:
         return {
@@ -78,12 +81,21 @@ class Analyzer:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.db = Database(settings.db_path)
+        # Mark any scans that were left in 'running' state by a previous
+        # process (SIGKILL, OOM, reboot) as 'crashed' before doing
+        # anything else.
+        crashed = self.db.mark_orphaned_scans_crashed()
+        if crashed:
+            logger.warning(
+                "marked %d previously-running scan(s) as crashed",
+                crashed,
+            )
         self.index = EmbeddingIndex(self.db)
         # Backend metadata only — workers load the actual model.
         info = get_backend_info(settings.backend)
         self.model_name: str = info.name
         self.embedding_dim: int = info.dim
-        self.pool: Optional[WorkerPool] = None
+        self.pool: WorkerPool | None = None
         self.status = ScanStatus()
         self._scan_lock = threading.Lock()
 
@@ -121,117 +133,162 @@ class Analyzer:
 
     def _run_scan(self, *, force: bool) -> None:
         self.status = ScanStatus(
-            state="scanning", phase="enumerating", started_at=time.time(),
+            state="scanning",
+            phase="enumerating",
+            started_at=time.time(),
         )
         t0 = time.monotonic()
 
-        libs = [Path(p) for p in self.settings.libraries]
-        if not libs:
-            logger.warning("no libraries configured (HARMONIE_LIBRARIES is empty)")
-        # Only prune entries that live under reachable roots so a flaky
-        # NAS doesn't wipe the index when the mount is unavailable.
-        reachable: list[Path] = []
-        unreachable: list[Path] = []
-        for p in libs:
-            if Path(p).expanduser().exists():
-                reachable.append(p)
-            else:
-                unreachable.append(p)
-        for p in unreachable:
-            logger.warning("library root unreachable, skipping: %s", p)
+        # Persist a 'running' scan row up front; we'll fill it in on
+        # success or failure via finish_scan in the finally branch.
+        self.status.scan_id = self.db.start_scan(
+            workers=self.settings.worker_count,
+            backend=self.settings.backend,
+            model=self.model_name,
+            forced=force,
+            harmonie_version=__version__,
+            descriptor_version=DESCRIPTOR_VERSION,
+        )
 
-        # Enumeration: update self.status.discovered on each yield, log
-        # every 10 seconds.
-        if reachable:
+        scan_state = "completed"
+        scan_last_error: str | None = None
+        try:
+            libs = [Path(p) for p in self.settings.libraries]
+            if not libs:
+                logger.warning("no libraries configured (HARMONIE_LIBRARIES is empty)")
+            # Only prune entries that live under reachable roots so a
+            # flaky NAS doesn't wipe the index when the mount is
+            # unavailable.
+            reachable: list[Path] = []
+            unreachable: list[Path] = []
+            for p in libs:
+                if Path(p).expanduser().exists():
+                    reachable.append(p)
+                else:
+                    unreachable.append(p)
+            for p in unreachable:
+                logger.warning("library root unreachable, skipping: %s", p)
+
+            # Enumeration: update self.status.discovered on each yield,
+            # log every 10 seconds.
+            if reachable:
+                logger.info(
+                    "scanning libraries: %s",
+                    ", ".join(str(p) for p in reachable),
+                )
+            files: list[Path] = []
+            last_progress = time.monotonic()
+            for f in iter_audio_files(reachable):
+                files.append(f)
+                self.status.discovered = len(files)
+                now = time.monotonic()
+                if now - last_progress > 10:
+                    logger.info(
+                        "enumerating: %d audio file(s) found so far...",
+                        len(files),
+                    )
+                    last_progress = now
+            logger.info("discovered %d audio file(s)", len(files))
+
+            # Classification: one stat() per file plus a DB lookup.
+            # Periodic progress on the same 10-second cadence as
+            # enumeration.
+            self.status.phase = "classifying"
+            classify_state = {"last": time.monotonic()}
+
+            def _classify_progress(n: int) -> None:
+                now = time.monotonic()
+                if now - classify_state["last"] > 10:
+                    logger.info(
+                        "classifying: %d / %d file(s) checked...",
+                        n,
+                        len(files),
+                    )
+                    classify_state["last"] = now
+
+            full_jobs, desc_jobs, skipped = build_jobs(
+                self.db,
+                files,
+                model_name=self.model_name,
+                force=force,
+                on_progress=_classify_progress,
+            )
+            self.status.skipped = skipped
             logger.info(
-                "scanning libraries: %s",
-                ", ".join(str(p) for p in reachable),
+                "jobs: full=%d, descriptors_only=%d, skipped=%d",
+                len(full_jobs),
+                len(desc_jobs),
+                skipped,
             )
-        files: list[Path] = []
-        last_progress = time.monotonic()
-        for f in iter_audio_files(reachable):
-            files.append(f)
-            self.status.discovered = len(files)
-            now = time.monotonic()
-            if now - last_progress > 10:
-                logger.info(
-                    "enumerating: %d audio file(s) found so far...", len(files),
+
+            # Worker pool starts only when there's work to dispatch.
+            all_jobs: list = list(full_jobs) + list(desc_jobs)
+            if all_jobs:
+                self.status.phase = "extracting"
+                if self.pool is None:
+                    self.start()
+                assert self.pool is not None
+                for result in self.pool.map(all_jobs, chunksize=1):
+                    self._handle_result(result, reachable_roots=reachable)
+
+            # Prune rows for files that disappeared, scoped to the roots
+            # we actually walked.
+            if reachable:
+                self.status.phase = "pruning"
+                present = {str(f) for f in files}
+                removed = self.db.prune_missing_under_roots(
+                    roots=reachable, keep=present
                 )
-                last_progress = now
-        logger.info("discovered %d audio file(s)", len(files))
-
-        # Classification: one stat() per file plus a DB lookup. Periodic
-        # progress on the same 10-second cadence as enumeration.
-        self.status.phase = "classifying"
-        classify_state = {"last": time.monotonic()}
-
-        def _classify_progress(n: int) -> None:
-            now = time.monotonic()
-            if now - classify_state["last"] > 10:
-                logger.info(
-                    "classifying: %d / %d file(s) checked...",
-                    n, len(files),
+                self.status.removed = removed
+                if removed:
+                    logger.info("pruned %d removed track(s)", removed)
+            else:
+                logger.warning("no reachable libraries this scan; skipping prune")
+        except Exception as exc:
+            scan_state = "crashed"
+            scan_last_error = repr(exc)
+            self.status.last_error = scan_last_error
+            logger.exception("scan crashed")
+            raise
+        finally:
+            elapsed = time.monotonic() - t0
+            # Drop cached embedding matrices; the next query rebuilds them.
+            self.index.invalidate()
+            self.status.state = "idle"
+            self.status.phase = "idle"
+            self.status.finished_at = time.time()
+            self.status.last_duration_sec = elapsed
+            # Persist the outcome.
+            try:
+                self.db.finish_scan(
+                    self.status.scan_id,
+                    duration_sec=elapsed,
+                    discovered=self.status.discovered,
+                    full=self.status.full,
+                    descriptors_only=self.status.descriptors_only,
+                    skipped=self.status.skipped,
+                    failed=self.status.failed,
+                    removed=self.status.removed,
+                    state=scan_state,
+                    last_error=scan_last_error,
                 )
-                classify_state["last"] = now
-
-        full_jobs, desc_jobs, skipped = build_jobs(
-            self.db, files,
-            model_name=self.model_name,
-            force=force,
-            on_progress=_classify_progress,
-        )
-        self.status.skipped = skipped
-        logger.info(
-            "jobs: full=%d, descriptors_only=%d, skipped=%d",
-            len(full_jobs), len(desc_jobs), skipped,
-        )
-
-        # Worker pool starts only when there's work to dispatch.
-        all_jobs: list = list(full_jobs) + list(desc_jobs)
-        if all_jobs:
-            self.status.phase = "extracting"
-            if self.pool is None:
-                self.start()
-            assert self.pool is not None
-            for result in self.pool.map(all_jobs, chunksize=1):
-                self._handle_result(result, reachable_roots=reachable)
-
-        # Prune rows for files that disappeared, scoped to the roots we
-        # actually walked.
-        if reachable:
-            self.status.phase = "pruning"
-            present = {str(f) for f in files}
-            removed = self.db.prune_missing_under_roots(
-                roots=reachable, keep=present
+            except Exception:  # pragma: no cover
+                logger.exception("failed to persist scan-history row")
+            logger.info(
+                "scan complete in %.1fs: full=%d, descriptors_only=%d, "
+                "skipped=%d, failed=%d, removed=%d",
+                elapsed,
+                self.status.full,
+                self.status.descriptors_only,
+                self.status.skipped,
+                self.status.failed,
+                self.status.removed,
             )
-            self.status.removed = removed
-            if removed:
-                logger.info("pruned %d removed track(s)", removed)
-        else:
-            logger.warning(
-                "no reachable libraries this scan; skipping prune"
-            )
-
-        elapsed = time.monotonic() - t0
-        # Drop cached embedding matrices; the next query rebuilds them.
-        self.index.invalidate()
-        self.status.state = "idle"
-        self.status.phase = "idle"
-        self.status.finished_at = time.time()
-        self.status.last_duration_sec = elapsed
-        logger.info(
-            "scan complete in %.1fs: full=%d, descriptors_only=%d, skipped=%d, "
-            "failed=%d, removed=%d",
-            elapsed, self.status.full, self.status.descriptors_only,
-            self.status.skipped, self.status.failed, self.status.removed,
-        )
 
     def _handle_result(self, result, *, reachable_roots: list[Path]) -> None:
         if isinstance(result, FullResult):
             try:
-                lib_root, rel_path = split_library_path(
-                    result.path, reachable_roots
-                )
+                lib_root, rel_path = split_library_path(result.path, reachable_roots)
                 self.db.upsert_track(
                     path=result.path,
                     size=result.size,
@@ -277,6 +334,18 @@ class Analyzer:
             self.status.failed += 1
             self.status.failures.append((result.path, result.error))
             logger.warning("extraction failed for %s: %s", result.path, result.error)
+            if self.status.scan_id is not None:
+                try:
+                    self.db.record_scan_failure(
+                        self.status.scan_id,
+                        path=result.path,
+                        error=result.error,
+                    )
+                except Exception:  # pragma: no cover
+                    logger.exception(
+                        "failed to persist scan_failure row for %s",
+                        result.path,
+                    )
 
         else:  # pragma: no cover
             logger.error("unknown worker result type: %r", type(result))

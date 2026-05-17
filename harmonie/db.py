@@ -21,16 +21,16 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any
 
 import numpy as np
 
 from .features import Descriptors
 from .migrations import run_migrations
 from .tags import Tags
-
 
 # Schema lives in :mod:`harmonie.migrations` — see migrations.py for the
 # canonical definition and the rules for adding a new migration.
@@ -48,24 +48,31 @@ class TrackFilter:
     """
 
     __slots__ = (
-        "bpm_min", "bpm_max", "key", "scale",
-        "danceability_min", "danceability_max",
-        "loudness_min", "loudness_max",
-        "styles", "style_min_probability", "style_match",
+        "bpm_min",
+        "bpm_max",
+        "key",
+        "scale",
+        "danceability_min",
+        "danceability_max",
+        "loudness_min",
+        "loudness_max",
+        "styles",
+        "style_min_probability",
+        "style_match",
     )
 
     def __init__(
         self,
         *,
-        bpm_min: Optional[float] = None,
-        bpm_max: Optional[float] = None,
-        key: Optional[list[str]] = None,
-        scale: Optional[str] = None,
-        danceability_min: Optional[float] = None,
-        danceability_max: Optional[float] = None,
-        loudness_min: Optional[float] = None,
-        loudness_max: Optional[float] = None,
-        styles: Optional[list[str]] = None,
+        bpm_min: float | None = None,
+        bpm_max: float | None = None,
+        key: list[str] | None = None,
+        scale: str | None = None,
+        danceability_min: float | None = None,
+        danceability_max: float | None = None,
+        loudness_min: float | None = None,
+        loudness_max: float | None = None,
+        styles: list[str] | None = None,
         style_min_probability: float = 0.0,
         style_match: str = "any",
     ) -> None:
@@ -174,7 +181,7 @@ class Database:
     def close(self) -> None:
         self._conn.close()
 
-    def __enter__(self) -> "Database":
+    def __enter__(self) -> Database:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -205,19 +212,17 @@ class Database:
         model: str,
         descriptors: Descriptors,
         descriptor_version: int,
-        tags: Optional[Tags] = None,
-        library_root: Optional[str] = None,
-        relative_path: Optional[str] = None,
-        style_activations: Optional[np.ndarray] = None,
-        top_styles: Optional[list[tuple[str, float]]] = None,
+        tags: Tags | None = None,
+        library_root: str | None = None,
+        relative_path: str | None = None,
+        style_activations: np.ndarray | None = None,
+        top_styles: list[tuple[str, float]] | None = None,
     ) -> int:
         emb = np.ascontiguousarray(embedding.astype(np.float32, copy=False))
         t = tags or Tags()
-        style_blob: Optional[bytes] = None
+        style_blob: bytes | None = None
         if style_activations is not None:
-            sa = np.ascontiguousarray(
-                style_activations.astype(np.float32, copy=False)
-            )
+            sa = np.ascontiguousarray(style_activations.astype(np.float32, copy=False))
             style_blob = sa.tobytes()
         with self.transaction() as cur:
             cur.execute(
@@ -292,17 +297,12 @@ class Database:
             # Replace the per-track style rows wholesale. ON DELETE CASCADE
             # covers the case where the track row was just inserted; for
             # an upsert we still need to clear the old rows explicitly.
-            cur.execute(
-                "DELETE FROM track_styles WHERE track_id = ?", (track_id,)
-            )
+            cur.execute("DELETE FROM track_styles WHERE track_id = ?", (track_id,))
             if top_styles:
                 cur.executemany(
                     "INSERT INTO track_styles (track_id, style, probability) "
                     "VALUES (?, ?, ?)",
-                    [
-                        (track_id, str(label), float(prob))
-                        for label, prob in top_styles
-                    ],
+                    [(track_id, str(label), float(prob)) for label, prob in top_styles],
                 )
             return track_id
 
@@ -312,8 +312,8 @@ class Database:
         *,
         descriptors: Descriptors,
         descriptor_version: int,
-        duration: Optional[float] = None,
-        tags: Optional[Tags] = None,
+        duration: float | None = None,
+        tags: Tags | None = None,
     ) -> bool:
         """Refresh descriptor + tag columns without touching the embedding."""
         t = tags or Tags()
@@ -370,9 +370,7 @@ class Database:
             cur.execute("DELETE FROM tracks WHERE id = ?", (int(track_id),))
             return cur.rowcount
 
-    def prune_missing_under_roots(
-        self, *, roots: list[Path], keep: set[str]
-    ) -> int:
+    def prune_missing_under_roots(self, *, roots: list[Path], keep: set[str]) -> int:
         """Delete every row whose path is under one of ``roots`` but not in
         ``keep``. Rows for paths outside the given roots are left alone.
 
@@ -410,12 +408,12 @@ class Database:
 
     # -- reads ---------------------------------------------------------
 
-    def get_track_by_id(self, track_id: int) -> Optional[dict]:
+    def get_track_by_id(self, track_id: int) -> dict | None:
         cur = self._conn.execute("SELECT * FROM tracks WHERE id = ?", (int(track_id),))
         row = cur.fetchone()
         return _row_to_dict(row) if row else None
 
-    def get_track_by_path(self, path: str) -> Optional[dict]:
+    def get_track_by_path(self, path: str) -> dict | None:
         cur = self._conn.execute("SELECT * FROM tracks WHERE path = ?", (path,))
         row = cur.fetchone()
         return _row_to_dict(row) if row else None
@@ -423,11 +421,11 @@ class Database:
     def find_track(
         self,
         *,
-        path: Optional[str] = None,
-        artist: Optional[str] = None,
-        album: Optional[str] = None,
-        title: Optional[str] = None,
-    ) -> Optional[dict]:
+        path: str | None = None,
+        artist: str | None = None,
+        album: str | None = None,
+        title: str | None = None,
+    ) -> dict | None:
         """Best-effort lookup of a single track by path and/or tags.
 
         Strategies are tried in order; the first hit wins. Returns the row
@@ -447,8 +445,7 @@ class Database:
             if row is not None:
                 return row
             cur = self._conn.execute(
-                "SELECT * FROM tracks WHERE relative_path = ? "
-                "ORDER BY id LIMIT 1",
+                "SELECT * FROM tracks WHERE relative_path = ? ORDER BY id LIMIT 1",
                 (path,),
             )
             row = cur.fetchone()
@@ -507,7 +504,7 @@ class Database:
         )
         return {int(r["id"]): dict(r) for r in cur}
 
-    def get_embedding_by_id(self, track_id: int) -> Optional[tuple[np.ndarray, str]]:
+    def get_embedding_by_id(self, track_id: int) -> tuple[np.ndarray, str] | None:
         cur = self._conn.execute(
             "SELECT embedding, embedding_dim, model FROM tracks WHERE id = ?",
             (int(track_id),),
@@ -543,7 +540,7 @@ class Database:
 
     def bpm_key_by_id_for_model(
         self, model: str
-    ) -> dict[int, tuple[Optional[float], Optional[str], Optional[str]]]:
+    ) -> dict[int, tuple[float | None, str | None, str | None]]:
         """Return ``{track_id: (bpm, key, scale)}`` for one model."""
         cur = self._conn.execute(
             "SELECT id, bpm, key, scale FROM tracks WHERE model = ?",
@@ -562,9 +559,7 @@ class Database:
         )
         return [(str(r["style"]), float(r["probability"])) for r in cur]
 
-    def get_styles_by_ids(
-        self, ids: list[int]
-    ) -> dict[int, list[tuple[str, float]]]:
+    def get_styles_by_ids(self, ids: list[int]) -> dict[int, list[tuple[str, float]]]:
         """Bulk version of :meth:`get_track_styles`. One query for all IDs."""
         if not ids:
             return {}
@@ -577,9 +572,7 @@ class Database:
         )
         out: dict[int, list[tuple[str, float]]] = {i: [] for i in ids}
         for r in cur:
-            out[int(r["track_id"])].append(
-                (str(r["style"]), float(r["probability"]))
-            )
+            out[int(r["track_id"])].append((str(r["style"]), float(r["probability"])))
         return out
 
     def filter_ids_by_style(
@@ -626,9 +619,7 @@ class Database:
             return {int(r["track_id"]) for r in cur if int(r["hits"]) >= need}
         return {int(r["track_id"]) for r in cur}
 
-    def list_styles(
-        self, *, min_probability: float = 0.0
-    ) -> list[dict]:
+    def list_styles(self, *, min_probability: float = 0.0) -> list[dict]:
         """Enumerate every style currently present in the DB.
 
         Returns a list of ``{style, track_count, mean_probability,
@@ -665,9 +656,7 @@ class Database:
             return True
         if int(meta["size"]) != int(size):
             return True
-        if abs(float(meta["mtime"]) - float(mtime)) > 1.0:
-            return True
-        return False
+        return abs(float(meta["mtime"]) - float(mtime)) > 1.0
 
     def needs_descriptor_refresh(self, path: str, current_version: int) -> bool:
         meta = self.get_track_by_path(path)
@@ -682,8 +671,8 @@ class Database:
     def list_tracks(
         self,
         *,
-        filter: Optional[TrackFilter] = None,
-        model: Optional[str] = None,
+        filter: TrackFilter | None = None,
+        model: str | None = None,
         limit: int = 100,
         offset: int = 0,
         order_by: str = "id",
@@ -740,8 +729,8 @@ class Database:
     def filtered_ids(
         self,
         *,
-        filter: Optional[TrackFilter] = None,
-        model: Optional[str] = None,
+        filter: TrackFilter | None = None,
+        model: str | None = None,
     ) -> set[int]:
         """Set of track IDs matching the given filter. Used by similarity
         search to gate candidates without loading the embedding matrix."""
@@ -756,9 +745,7 @@ class Database:
                 clauses.append(f_sql)
                 params.extend(f_params)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        cur = self._conn.execute(
-            f"SELECT id FROM tracks {where}", tuple(params)
-        )
+        cur = self._conn.execute(f"SELECT id FROM tracks {where}", tuple(params))
         ids = {int(r["id"]) for r in cur}
         if filter is not None and filter.has_style_filter():
             style_ids = self.filter_ids_by_style(
@@ -770,7 +757,7 @@ class Database:
         return ids
 
     def all_embeddings(
-        self, model: Optional[str] = None
+        self, model: str | None = None
     ) -> tuple[list[int], list[str], np.ndarray]:
         """Return (ids, paths, NxD matrix) for use in similarity search."""
         if model is None:
@@ -786,7 +773,7 @@ class Database:
         ids: list[int] = []
         paths: list[str] = []
         vectors: list[np.ndarray] = []
-        dim: Optional[int] = None
+        dim: int | None = None
         for row in cur:
             d = int(row["embedding_dim"])
             if dim is None:
@@ -795,13 +782,159 @@ class Database:
                 continue
             ids.append(int(row["id"]))
             paths.append(row["path"])
-            vectors.append(
-                np.frombuffer(row["embedding"], dtype=np.float32).reshape(d)
-            )
+            vectors.append(np.frombuffer(row["embedding"], dtype=np.float32).reshape(d))
         if not vectors:
             return [], [], np.empty((0, 0), dtype=np.float32)
         mat = np.stack(vectors).astype(np.float32, copy=False)
         return ids, paths, mat
+
+    # -- scan history --------------------------------------------------
+
+    def start_scan(
+        self,
+        *,
+        workers: int,
+        backend: str,
+        model: str,
+        forced: bool,
+        harmonie_version: str,
+        descriptor_version: int,
+    ) -> int:
+        """Insert a new scan row in ``running`` state. Returns its id."""
+        with self.transaction() as cur:
+            cur.execute(
+                "INSERT INTO scans ("
+                " started_at, workers, backend, model, forced,"
+                " harmonie_version, descriptor_version, state"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, 'running')",
+                (
+                    time.time(),
+                    int(workers),
+                    backend,
+                    model,
+                    1 if forced else 0,
+                    harmonie_version,
+                    int(descriptor_version),
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def record_scan_failure(
+        self,
+        scan_id: int,
+        *,
+        path: str,
+        error: str,
+        size: int | None = None,
+        mtime: float | None = None,
+    ) -> None:
+        """Append one failure row tied to ``scan_id``."""
+        with self.transaction() as cur:
+            cur.execute(
+                "INSERT INTO scan_failures "
+                "(scan_id, path, error, failed_at, size, mtime) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    int(scan_id),
+                    path,
+                    error,
+                    time.time(),
+                    int(size) if size is not None else None,
+                    float(mtime) if mtime is not None else None,
+                ),
+            )
+
+    def finish_scan(
+        self,
+        scan_id: int,
+        *,
+        duration_sec: float,
+        discovered: int,
+        full: int,
+        descriptors_only: int,
+        skipped: int,
+        failed: int,
+        removed: int,
+        state: str = "completed",
+        last_error: str | None = None,
+    ) -> None:
+        """Update the scan row with final counters and outcome."""
+        with self.transaction() as cur:
+            cur.execute(
+                "UPDATE scans SET"
+                " finished_at = ?,"
+                " duration_sec = ?,"
+                " discovered = ?,"
+                " full = ?,"
+                " descriptors_only = ?,"
+                " skipped = ?,"
+                " failed = ?,"
+                " removed = ?,"
+                " state = ?,"
+                " last_error = ?"
+                " WHERE id = ?",
+                (
+                    time.time(),
+                    float(duration_sec),
+                    int(discovered),
+                    int(full),
+                    int(descriptors_only),
+                    int(skipped),
+                    int(failed),
+                    int(removed),
+                    state,
+                    last_error,
+                    int(scan_id),
+                ),
+            )
+
+    def mark_orphaned_scans_crashed(self) -> int:
+        """Mark any ``running`` scan rows from a previous process as
+        ``crashed``. Returns the number of rows updated."""
+        with self.transaction() as cur:
+            cur.execute(
+                "UPDATE scans SET"
+                " state = 'crashed',"
+                " finished_at = COALESCE(finished_at, started_at),"
+                " last_error = COALESCE(last_error, 'interrupted before completion')"
+                " WHERE state = 'running'"
+            )
+            return cur.rowcount
+
+    def list_scans(
+        self, *, limit: int = 100, offset: int = 0
+    ) -> tuple[list[dict], int]:
+        """Return ``(rows, total_count)`` ordered by ``started_at`` desc."""
+        total = self._conn.execute("SELECT COUNT(*) FROM scans").fetchone()[0]
+        cur = self._conn.execute(
+            "SELECT * FROM scans ORDER BY started_at DESC LIMIT ? OFFSET ?",
+            (int(limit), int(offset)),
+        )
+        return [dict(r) for r in cur], int(total)
+
+    def get_scan(self, scan_id: int) -> dict | None:
+        cur = self._conn.execute("SELECT * FROM scans WHERE id = ?", (int(scan_id),))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def list_failures_for_scan(
+        self, scan_id: int, *, limit: int = 100, offset: int = 0
+    ) -> tuple[list[dict], int]:
+        """Return ``(rows, total_count)`` for failures of one scan,
+        ordered by ``failed_at`` ascending (matches the order they
+        were observed during extraction)."""
+        total = self._conn.execute(
+            "SELECT COUNT(*) FROM scan_failures WHERE scan_id = ?",
+            (int(scan_id),),
+        ).fetchone()[0]
+        cur = self._conn.execute(
+            "SELECT * FROM scan_failures WHERE scan_id = ? "
+            "ORDER BY failed_at ASC LIMIT ? OFFSET ?",
+            (int(scan_id), int(limit), int(offset)),
+        )
+        return [dict(r) for r in cur], int(total)
+
+    # -- stats ---------------------------------------------------------
 
     def stats(self) -> dict:
         cur = self._conn.execute(
@@ -820,7 +953,5 @@ class Database:
             "total_bytes": int(total_bytes or 0),
             "by_model": by_model,
             "db_path": str(self.path),
-            "db_size_bytes": (
-                os.path.getsize(self.path) if self.path.exists() else 0
-            ),
+            "db_size_bytes": (os.path.getsize(self.path) if self.path.exists() else 0),
         }

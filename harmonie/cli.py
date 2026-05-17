@@ -16,10 +16,8 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Optional
 
 from .config import configure_logging, get_settings
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -202,10 +200,14 @@ def cmd_info(args: argparse.Namespace) -> int:
             print(f"  Album:        {_fmt_opt(row.get('album'))}")
             print(f"  Title:        {_fmt_opt(row.get('title'))}")
             print(f"  Track #:      {_fmt_opt(row.get('track_number'))}")
-        print(f"BPM:            {_fmt_opt(row['bpm'], '.1f')}"
-              f"   confidence: {_fmt_opt(row.get('bpm_confidence'), '.2f')}")
-        print(f"Key:            {key_disp}"
-              f"   strength: {_fmt_opt(row.get('key_strength'), '.2f')}")
+        print(
+            f"BPM:            {_fmt_opt(row['bpm'], '.1f')}"
+            f"   confidence: {_fmt_opt(row.get('bpm_confidence'), '.2f')}"
+        )
+        print(
+            f"Key:            {key_disp}"
+            f"   strength: {_fmt_opt(row.get('key_strength'), '.2f')}"
+        )
         print(f"Loudness (RG):  {_fmt_opt(row['loudness'], '.2f')} dB")
         print(f"Danceability:   {_fmt_opt(row['danceability'], '.2f')}")
         print(f"Onset rate:     {_fmt_opt(row['onset_rate'], '.2f')}/s")
@@ -227,8 +229,10 @@ def cmd_similar(args: argparse.Namespace) -> int:
         if args.json:
             print(
                 json.dumps(
-                    [{"track_id": m.track_id, "path": m.path, "score": m.score}
-                     for m in matches],
+                    [
+                        {"track_id": m.track_id, "path": m.path, "score": m.score}
+                        for m in matches
+                    ],
                     indent=2,
                 )
             )
@@ -270,7 +274,8 @@ def cmd_list(args: argparse.Namespace) -> int:
         for r in rows:
             key_str = (
                 f"{r['key']}{'m' if (r.get('scale') == 'minor') else ''}"
-                if r.get("key") else "—"
+                if r.get("key")
+                else "—"
             )
             print(
                 f"{r['id']:>5}  "
@@ -310,6 +315,108 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("By model:")
         for model, count in s["by_model"].items():
             print(f"  {model}: {count}")
+    return 0
+
+
+def _fmt_ts(epoch: float | None) -> str:
+    """Local-time ``YYYY-MM-DD HH:MM:SS``, or ``—`` for None."""
+    if epoch is None:
+        return "—"
+    from datetime import datetime
+
+    return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _fmt_duration_sec(seconds: float | None) -> str:
+    if seconds is None:
+        return "—"
+    return _fmt_duration(seconds)
+
+
+def cmd_scans(args: argparse.Namespace) -> int:
+    """List recent scans, or show a single scan with its failures."""
+    settings = get_settings()
+    configure_logging(settings)
+    from .db import Database
+
+    db = Database(settings.db_path)
+    try:
+        if args.scan_id is not None:
+            return _print_one_scan(db, args.scan_id, json_out=args.json)
+        return _print_scan_list(db, limit=args.limit, json_out=args.json)
+    finally:
+        db.close()
+
+
+def _print_scan_list(db, *, limit: int, json_out: bool) -> int:
+    rows, total = db.list_scans(limit=limit)
+    if json_out:
+        print(json.dumps({"items": rows, "total": total}, indent=2, default=str))
+        return 0
+    if not rows:
+        print("No scans recorded yet.")
+        return 0
+    print(
+        f"{'ID':>5}  {'Started':<19}  {'Duration':>10}  "
+        f"{'Full':>5}  {'Skip':>5}  {'Fail':>4}  {'State':<10}"
+    )
+    for r in rows:
+        print(
+            f"{r['id']:>5}  "
+            f"{_fmt_ts(r['started_at']):<19}  "
+            f"{_fmt_duration_sec(r['duration_sec']):>10}  "
+            f"{r['full']:>5}  "
+            f"{r['skipped']:>5}  "
+            f"{r['failed']:>4}  "
+            f"{r['state']:<10}"
+        )
+    print(f"\n{len(rows)} of {total} scan(s).")
+    return 0
+
+
+def _print_one_scan(db, scan_id: int, *, json_out: bool) -> int:
+    row = db.get_scan(scan_id)
+    if row is None:
+        print(f"Scan {scan_id} not found.", file=sys.stderr)
+        return 1
+    failures, total = db.list_failures_for_scan(scan_id, limit=10_000)
+    if json_out:
+        print(
+            json.dumps(
+                {"scan": row, "failures": failures, "failures_total": total},
+                indent=2,
+                default=str,
+            )
+        )
+        return 0
+    print(f"Scan #{row['id']}")
+    print(f"  Started:        {_fmt_ts(row['started_at'])}")
+    print(f"  Finished:       {_fmt_ts(row['finished_at'])}")
+    print(f"  Duration:       {_fmt_duration_sec(row['duration_sec'])}")
+    print(f"  Workers:        {row['workers']}")
+    print(f"  Backend:        {row['backend']}")
+    print(f"  Model:          {row['model']}")
+    print(f"  Forced:         {'yes' if row['forced'] else 'no'}")
+    print(f"  Version:        {row['harmonie_version']}")
+    print(f"  Descriptor v:   {row['descriptor_version']}")
+    print(f"  State:          {row['state']}")
+    if row.get("last_error"):
+        print(f"  Last error:     {row['last_error']}")
+    print()
+    print("Counters:")
+    print(f"  Discovered:     {row['discovered']}")
+    print(f"  Full:           {row['full']}")
+    print(f"  Descriptors:    {row['descriptors_only']}")
+    print(f"  Skipped:        {row['skipped']}")
+    print(f"  Failed:         {row['failed']}")
+    print(f"  Removed:        {row['removed']}")
+    if total:
+        print()
+        print(f"Failures ({total}):")
+        for f in failures:
+            print(f"  {f['path']}")
+            print(f"    Error: {f['error']}")
+            print(f"    At:    {_fmt_ts(f['failed_at'])}")
     return 0
 
 
@@ -374,10 +481,30 @@ def build_parser() -> argparse.ArgumentParser:
     pst.add_argument("--json", action="store_true")
     pst.set_defaults(func=cmd_status)
 
+    pscans = sub.add_parser(
+        "scans",
+        help="List recent scans (debugging). Pass a scan id to drill in.",
+    )
+    pscans.add_argument(
+        "scan_id",
+        nargs="?",
+        type=int,
+        default=None,
+        help="Show this scan's details and failures instead of the list.",
+    )
+    pscans.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="How many scans to list (default 10).",
+    )
+    pscans.add_argument("--json", action="store_true")
+    pscans.set_defaults(func=cmd_scans)
+
     return p
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

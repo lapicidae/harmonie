@@ -217,3 +217,109 @@ class TestSimilar:
         assert rc == 1
         err = capsys.readouterr().err
         assert "999999" in err
+
+
+# ---------------------------------------------------------------------------
+# scans (debugging)
+# ---------------------------------------------------------------------------
+
+
+class TestScans:
+    def test_empty_history_listing(self, cli_env, capsys):
+        rc = main(["scans"])
+        assert rc == 0
+        assert "No scans" in capsys.readouterr().out
+
+    def test_listing_recent_scans(self, cli_env, capsys):
+        db, *_ = cli_env
+        sid = db.start_scan(
+            workers=4,
+            backend="effnet",
+            model="discogs-effnet-bs64-1",
+            forced=False,
+            harmonie_version="0.0.0+test",
+            descriptor_version=1,
+        )
+        db.finish_scan(
+            sid,
+            duration_sec=12.5,
+            discovered=10,
+            full=2,
+            descriptors_only=0,
+            skipped=8,
+            failed=1,
+            removed=0,
+            state="completed",
+        )
+        rc = main(["scans"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "ID" in out and "Started" in out
+        assert "completed" in out
+        assert "1 of 1" in out
+
+    def test_show_one_scan_with_failure(self, cli_env, capsys):
+        db, *_ = cli_env
+        sid = db.start_scan(
+            workers=4,
+            backend="effnet",
+            model="discogs-effnet-bs64-1",
+            forced=True,
+            harmonie_version="0.0.0+test",
+            descriptor_version=1,
+        )
+        db.record_scan_failure(
+            sid,
+            path="/lib/broken.flac",
+            error="bad header",
+        )
+        db.finish_scan(
+            sid,
+            duration_sec=1.0,
+            discovered=1,
+            full=0,
+            descriptors_only=0,
+            skipped=0,
+            failed=1,
+            removed=0,
+            state="completed",
+        )
+        rc = main(["scans", str(sid)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert f"Scan #{sid}" in out
+        assert "Forced:         yes" in out
+        assert "/lib/broken.flac" in out
+        assert "bad header" in out
+
+    def test_unknown_scan_id_exits_1(self, cli_env, capsys):
+        rc = main(["scans", "999999"])
+        assert rc == 1
+        assert "not found" in capsys.readouterr().err
+
+    def test_scans_json_output(self, cli_env, capsys):
+        db, *_ = cli_env
+        sid = db.start_scan(
+            workers=4,
+            backend="effnet",
+            model="discogs-effnet-bs64-1",
+            forced=False,
+            harmonie_version="0.0.0+test",
+            descriptor_version=1,
+        )
+        db.finish_scan(
+            sid,
+            duration_sec=1.0,
+            discovered=0,
+            full=0,
+            descriptors_only=0,
+            skipped=0,
+            failed=0,
+            removed=0,
+            state="completed",
+        )
+        rc = main(["scans", "--json"])
+        assert rc == 0
+        body = json.loads(capsys.readouterr().out)
+        assert body["total"] == 1
+        assert body["items"][0]["id"] == sid

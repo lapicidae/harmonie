@@ -177,3 +177,148 @@ def test_scan_is_a_noop_when_already_running(harness):
     assert observations == []  # no new work happened
 
     analyzer._scan_lock.release()
+
+
+# ---------------------------------------------------------------------------
+# Scan-history persistence (migration 002)
+# ---------------------------------------------------------------------------
+
+
+def test_scan_writes_scans_row(harness):
+    """A successful scan inserts and finalizes one row in the ``scans``
+    table with the expected counters and configuration."""
+    analyzer, _ = harness
+    analyzer.scan()
+
+    rows, total = analyzer.db.list_scans(limit=10)
+    assert total == 1
+    row = rows[0]
+    assert row["state"] == "completed"
+    assert row["workers"] == analyzer.settings.worker_count
+    assert row["backend"] == analyzer.settings.backend
+    assert row["model"] == analyzer.model_name
+    assert row["forced"] == 0
+    assert row["finished_at"] is not None
+    assert row["duration_sec"] is not None
+    assert row["duration_sec"] >= 0
+    assert row["discovered"] == 2
+    assert row["last_error"] is None
+
+
+def test_scan_records_each_failure(tmp_path, monkeypatch):
+    """Every JobError yielded by the pool gets persisted to
+    scan_failures with the right scan_id."""
+    from harmonie.workers import JobError
+
+    lib = tmp_path / "library"
+    lib.mkdir()
+    settings = Settings(libraries=[lib], data_dir=tmp_path)
+    analyzer = Analyzer(settings)
+    try:
+        monkeypatch.setattr(
+            analyzer_mod,
+            "iter_audio_files",
+            lambda roots: iter([Path("/lib/a.flac"), Path("/lib/b.flac")]),
+        )
+
+        def two_jobs(db, files, *, model_name, force, on_progress=None):
+            from harmonie.workers import FullJob
+
+            return (
+                [FullJob(path=str(f), size=1, mtime=1.0) for f in files],
+                [],
+                0,
+            )
+
+        monkeypatch.setattr(analyzer_mod, "build_jobs", two_jobs)
+
+        class FailingPool:
+            def map(self, jobs, *, chunksize=1):
+                for j in jobs:
+                    yield JobError(path=j.path, error="not real audio")
+
+            def close(self) -> None:
+                pass
+
+        analyzer.pool = FailingPool()
+        monkeypatch.setattr(
+            analyzer.db,
+            "prune_missing_under_roots",
+            lambda *, roots, keep: 0,
+        )
+
+        analyzer.scan()
+
+        # One scan row, two failure rows under it.
+        rows, _ = analyzer.db.list_scans(limit=10)
+        assert len(rows) == 1
+        sid = rows[0]["id"]
+        assert rows[0]["failed"] == 2
+
+        failures, total = analyzer.db.list_failures_for_scan(sid)
+        assert total == 2
+        paths = sorted(f["path"] for f in failures)
+        assert paths == ["/lib/a.flac", "/lib/b.flac"]
+        for f in failures:
+            assert f["error"] == "not real audio"
+    finally:
+        analyzer.stop()
+
+
+def test_orphaned_running_scans_marked_crashed_on_construction(tmp_path, caplog):
+    """Constructing a fresh Analyzer cleans up any 'running' scan rows
+    left behind by a previous process."""
+    settings = Settings(libraries=[tmp_path], data_dir=tmp_path)
+    # First Analyzer simulates a process that started a scan and died:
+    # insert a 'running' row directly without finishing it.
+    a1 = Analyzer(settings)
+    sid = a1.db.start_scan(
+        workers=1,
+        backend="effnet",
+        model="discogs-effnet-bs64-1",
+        forced=False,
+        harmonie_version="0.0.0+test",
+        descriptor_version=1,
+    )
+    a1.db.close()  # don't call stop() — we want the row left as 'running'.
+
+    # Second Analyzer should observe and clean it up.
+    with caplog.at_level("WARNING", logger="harmonie.analyzer"):
+        a2 = Analyzer(settings)
+    try:
+        row = a2.db.get_scan(sid)
+        assert row["state"] == "crashed"
+        assert "interrupted" in row["last_error"]
+        assert row["finished_at"] is not None
+        assert any(
+            "marked" in r.getMessage() and "crashed" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        a2.stop()
+
+
+def test_crashed_scan_persists_state_and_error(tmp_path, monkeypatch):
+    """If _run_scan raises, the scan row is finalized with state='crashed'
+    and last_error set."""
+    lib = tmp_path / "library"
+    lib.mkdir()
+    settings = Settings(libraries=[lib], data_dir=tmp_path)
+    analyzer = Analyzer(settings)
+    try:
+
+        def boom(roots):
+            raise RuntimeError("filesystem on fire")
+
+        monkeypatch.setattr(analyzer_mod, "iter_audio_files", boom)
+
+        with pytest.raises(RuntimeError, match="filesystem on fire"):
+            analyzer.scan()
+
+        rows, _ = analyzer.db.list_scans(limit=1)
+        assert len(rows) == 1
+        assert rows[0]["state"] == "crashed"
+        assert "filesystem on fire" in rows[0]["last_error"]
+        assert rows[0]["finished_at"] is not None
+    finally:
+        analyzer.stop()

@@ -442,3 +442,189 @@ def test_find_track_partial_tags_too_loose(tmp_db_path):
         assert db.find_track(title="Common Title") is None
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Scan history (migration 002)
+# ---------------------------------------------------------------------------
+
+
+def _start_scan(db, **overrides):
+    """Helper: insert a scan row with sensible defaults, return its id."""
+    kwargs = {
+        "workers": 4,
+        "backend": "effnet",
+        "model": "discogs-effnet-bs64-1",
+        "forced": False,
+        "harmonie_version": "0.0.0+test",
+        "descriptor_version": 1,
+    }
+    kwargs.update(overrides)
+    return db.start_scan(**kwargs)
+
+
+def test_start_scan_inserts_running_row(tmp_db_path):
+    db = Database(tmp_db_path)
+    try:
+        sid = _start_scan(db, workers=12, forced=True)
+        row = db.get_scan(sid)
+        assert row is not None
+        assert row["state"] == "running"
+        assert row["workers"] == 12
+        assert row["forced"] == 1
+        assert row["finished_at"] is None
+        assert row["started_at"] > 0
+    finally:
+        db.close()
+
+
+def test_record_scan_failure_writes_row(tmp_db_path):
+    db = Database(tmp_db_path)
+    try:
+        sid = _start_scan(db)
+        db.record_scan_failure(
+            sid,
+            path="/lib/broken.flac",
+            error="boom",
+            size=42,
+            mtime=1.5,
+        )
+        rows, total = db.list_failures_for_scan(sid)
+        assert total == 1
+        assert rows[0]["path"] == "/lib/broken.flac"
+        assert rows[0]["error"] == "boom"
+        assert rows[0]["size"] == 42
+        assert rows[0]["mtime"] == 1.5
+    finally:
+        db.close()
+
+
+def test_finish_scan_updates_counters_and_state(tmp_db_path):
+    db = Database(tmp_db_path)
+    try:
+        sid = _start_scan(db)
+        db.finish_scan(
+            sid,
+            duration_sec=12.5,
+            discovered=100,
+            full=10,
+            descriptors_only=2,
+            skipped=85,
+            failed=3,
+            removed=0,
+            state="completed",
+        )
+        row = db.get_scan(sid)
+        assert row["state"] == "completed"
+        assert row["duration_sec"] == 12.5
+        assert row["full"] == 10
+        assert row["failed"] == 3
+        assert row["finished_at"] is not None
+    finally:
+        db.close()
+
+
+def test_finish_scan_records_crash_state(tmp_db_path):
+    db = Database(tmp_db_path)
+    try:
+        sid = _start_scan(db)
+        db.finish_scan(
+            sid,
+            duration_sec=1.0,
+            discovered=0,
+            full=0,
+            descriptors_only=0,
+            skipped=0,
+            failed=0,
+            removed=0,
+            state="crashed",
+            last_error="kaboom",
+        )
+        row = db.get_scan(sid)
+        assert row["state"] == "crashed"
+        assert row["last_error"] == "kaboom"
+    finally:
+        db.close()
+
+
+def test_mark_orphaned_scans_crashed(tmp_db_path):
+    """Any 'running' rows from a previous process get marked 'crashed'
+    with a synthetic finished_at and a default last_error."""
+    db = Database(tmp_db_path)
+    try:
+        sid_running = _start_scan(db)
+        sid_done = _start_scan(db)
+        db.finish_scan(
+            sid_done,
+            duration_sec=1.0,
+            discovered=0,
+            full=0,
+            descriptors_only=0,
+            skipped=0,
+            failed=0,
+            removed=0,
+            state="completed",
+        )
+
+        n = db.mark_orphaned_scans_crashed()
+        assert n == 1
+
+        running = db.get_scan(sid_running)
+        assert running["state"] == "crashed"
+        assert running["finished_at"] is not None  # synthesized from started_at
+        assert "interrupted" in running["last_error"]
+
+        done = db.get_scan(sid_done)
+        assert done["state"] == "completed"  # untouched
+    finally:
+        db.close()
+
+
+def test_list_scans_orders_newest_first(tmp_db_path):
+    import time as _time
+
+    db = Database(tmp_db_path)
+    try:
+        first = _start_scan(db)
+        _time.sleep(0.01)
+        second = _start_scan(db)
+        rows, total = db.list_scans(limit=10)
+        assert total == 2
+        assert rows[0]["id"] == second
+        assert rows[1]["id"] == first
+    finally:
+        db.close()
+
+
+def test_list_failures_pagination(tmp_db_path):
+    db = Database(tmp_db_path)
+    try:
+        sid = _start_scan(db)
+        for i in range(7):
+            db.record_scan_failure(
+                sid,
+                path=f"/lib/{i}.flac",
+                error=f"err {i}",
+            )
+        rows, total = db.list_failures_for_scan(sid, limit=3, offset=0)
+        assert total == 7
+        assert len(rows) == 3
+        rows2, _ = db.list_failures_for_scan(sid, limit=10, offset=5)
+        assert len(rows2) == 2
+    finally:
+        db.close()
+
+
+def test_scan_failures_cascade_on_scan_delete(tmp_db_path):
+    """Deleting a scan row cascades to its scan_failures rows."""
+    db = Database(tmp_db_path)
+    try:
+        sid = _start_scan(db)
+        db.record_scan_failure(sid, path="/lib/a.flac", error="oops")
+        with db.transaction() as cur:
+            cur.execute("DELETE FROM scans WHERE id = ?", (sid,))
+        rows, total = db.list_failures_for_scan(sid)
+        assert total == 0
+        assert rows == []
+    finally:
+        db.close()
