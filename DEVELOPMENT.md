@@ -70,6 +70,7 @@ The two-version split (`model` vs `descriptor_version`) lets a descriptor-algori
 * Brute-force similarity holds up to ~250k tracks. Above that, swap `harmonie.similarity` for FAISS or hnswlib. The API is small.
 * 100k tracks × 1280 floats = 512 MB of embeddings in memory plus the model and overhead. Expect 1.5–2 GB RSS.
 * Initial scans of large libraries are CPU-bound at ~4 s/track. Scale `HARMONIE_WORKERS` to your core count; each worker holds its own copy of the model (~200 MB).
+* Per-worker memory peaks well above the 200 MB baseline during extraction. A 30-minute FLAC decoded to 44.1 kHz mono float32 is ~317 MB on its own; resampling and TF inference push the working set close to 1 GB per worker on long files. On RAM-constrained boxes (or any system with no swap, where systemd-oomd is aggressive about memory pressure), set `HARMONIE_WORKERS` low enough that `workers × 1 GB` fits comfortably in available RAM. 6 workers on a 24 GB box is a safe starting point for libraries with classical recordings.
 * SQLite is fine to several million rows. Move to Postgres only if you want multiple service instances sharing one DB.
 
 ## Lint and format

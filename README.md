@@ -8,7 +8,7 @@ Audio similarity service. Scans a music library, extracts a per-track embedding 
 
 Built around Essentia's Discogs-Effnet model — a 1280-d embedding trained on Discogs tags that captures genre / style / sonic character.
 
-Run it as a long-lived service. It rescans on a schedule and serves any HTTP client that wants similarity queries against the indexed catalog.
+[Run it as a long-lived service](#running-as-a-service). It rescans on a schedule and serves any HTTP client that wants similarity queries against the indexed catalog.
 
 ## Contents
 
@@ -16,17 +16,15 @@ Run it as a long-lived service. It rescans on a schedule and serves any HTTP cli
 - [API](#api)
 - [Playlists](#playlists)
 - [Configuration](#configuration)
+- [Running as a service](#running-as-a-service)
 
 ## Install
 
 The fastest install on any host with Python 3.9+ is via [pipx][pipx], which puts harmonie in its own isolated virtualenv and the `harmonie` binary on your PATH.
 
 ```bash
-# One-time: install pipx itself.
-sudo apt install pipx           # Debian/Ubuntu
-# sudo dnf install pipx         # Fedora
-# brew install pipx             # macOS
-# python3 -m pip install --user pipx   # any other distro
+# One-time: install pipx.
+sudo apt install pipx
 pipx ensurepath
 
 # Install harmonie from GitHub. --pre is required because essentia-tensorflow
@@ -347,7 +345,7 @@ All settings come from environment variables (or a `.env` file in the working di
 | --- | --- | --- |
 | `HARMONIE_LIBRARIES` | (none) | Comma- or colon-separated absolute paths to scan |
 | `HARMONIE_DATA_DIR` | platform user-data dir | Where to put `harmonie.db`. Defaults to `~/.local/share/harmonie` on Linux, `~/Library/Application Support/harmonie` on macOS. |
-| `HARMONIE_WORKERS` | CPU count | Analysis worker processes |
+| `HARMONIE_WORKERS` | CPU count | Analysis worker processes. Each worker peaks around 1 GB of RAM during extraction of long files (10+ minute classical recordings, etc.), so set this conservatively on RAM-constrained boxes. |
 | `HARMONIE_SCAN_INTERVAL_HOURS` | `6` | Periodic scan interval (`0` disables) |
 | `HARMONIE_SCAN_ON_STARTUP` | `true` | Run a scan immediately on boot |
 | `HARMONIE_HOST` | `0.0.0.0` | HTTP bind address |
@@ -355,6 +353,45 @@ All settings come from environment variables (or a `.env` file in the working di
 | `HARMONIE_API_KEY` | (none) | If set, required in `X-API-Key` |
 | `HARMONIE_CORS_ORIGINS` | (none) | Comma-separated list to enable CORS |
 | `HARMONIE_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+
+
+## Running as a service
+
+For long-lived deployments, run harmonie under systemd rather than in a shell or tmux. Systemd handles restarts, captures logs, and isn't tied to a login session.
+
+Create `/etc/systemd/system/harmonie.service`:
+
+```ini
+[Unit]
+Description=harmonie audio similarity service
+After=network-online.target
+
+[Service]
+Type=exec
+User=<your-user>
+WorkingDirectory=/home/<your-user>
+Environment=HARMONIE_LIBRARIES=/path/to/music
+Environment=HARMONIE_DATA_DIR=/home/<your-user>/.local/share/harmonie
+Environment=HARMONIE_WORKERS=6
+Environment=HARMONIE_PORT=8842
+ExecStart=/home/<your-user>/.local/bin/harmonie serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Replace `<your-user>`, paths, and env vars with your own. Then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now harmonie
+sudo systemctl status harmonie
+journalctl -u harmonie -f         # live logs
+```
+
+After config changes, `sudo systemctl restart harmonie`.
 
 
 ## Development
