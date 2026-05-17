@@ -5,8 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "harmonie"
 # Version is derived from git via setuptools-scm — see [tool.setuptools_scm]
-# below. Each commit on main produces a unique version string like
-# 0.0.post47+g2122e65, so `pipx upgrade harmonie` actually upgrades.
+# below. Tagged commits get the tag's version (e.g. ``v1.0.0`` → ``1.0.0``);
+# untagged commits get a unique ``MAJOR.MINOR.PATCH.devN+gHASH`` string so
+# ``pipx upgrade harmonie`` actually upgrades.
 dynamic = ["version"]
 description = "Audio similarity service. Scans music libraries, extracts Essentia embeddings + descriptors, exposes an HTTP API for similarity queries and playlist generation."
 readme = "README.md"
