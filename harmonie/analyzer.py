@@ -127,10 +127,14 @@ class Analyzer:
         on the next iteration and the pool is terminated so workers stuck
         on slow I/O (CIFS, NFS) abort instead of waiting.
 
-        Returns True if a scan was active, False if no-op.
+        Returns True if a scan was active, False if no-op. Idempotent —
+        repeated calls during the same scan are silent no-ops.
         """
         if self.status.state != "scanning":
             return False
+        if self._cancel_event.is_set():
+            # Already requested. Don't log or re-terminate.
+            return True
         logger.warning("scan cancellation requested")
         self._cancel_event.set()
         if self.pool is not None:
