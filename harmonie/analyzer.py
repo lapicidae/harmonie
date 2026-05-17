@@ -13,7 +13,7 @@ from pathlib import Path
 from . import __version__
 from .config import Settings
 from .db import Database
-from .features import DESCRIPTOR_VERSION, get_backend_info
+from .features import DESCRIPTOR_VERSION, EMBEDDING_DIM, MODEL_NAME
 from .index import EmbeddingIndex
 from .scan import iter_audio_files, split_library_path
 from .workers import (
@@ -102,10 +102,10 @@ class Analyzer:
                 crashed,
             )
         self.index = EmbeddingIndex(self.db)
-        # Backend metadata only — workers load the actual model.
-        info = get_backend_info(settings.backend)
-        self.model_name: str = info.name
-        self.embedding_dim: int = info.dim
+        # Workers load the actual model; the main process just records
+        # which model rows were extracted with.
+        self.model_name: str = MODEL_NAME
+        self.embedding_dim: int = EMBEDDING_DIM
         self.pool: WorkerPool | None = None
         self.status = ScanStatus()
         self._scan_lock = threading.Lock()
@@ -118,7 +118,6 @@ class Analyzer:
     def start(self) -> None:
         if self.pool is None:
             self.pool = WorkerPool(
-                backend=self.settings.backend,
                 workers=self.settings.worker_count,
                 log_level=self.settings.log_level,
             )
@@ -187,7 +186,10 @@ class Analyzer:
         # success or failure via finish_scan in the finally branch.
         self.status.scan_id = self.db.start_scan(
             workers=self.settings.worker_count,
-            backend=self.settings.backend,
+            # The scans.backend column predates removing the
+            # MusicExtractor option — it's always "effnet" now but the
+            # column stays so historical rows still parse.
+            backend="effnet",
             model=self.model_name,
             forced=force,
             harmonie_version=__version__,

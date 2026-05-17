@@ -98,7 +98,7 @@ The non-Essentia parts (DB, similarity, playlist, scan, tags, API) are covered b
 
 Every scan run is persisted to two tables (added in migration 002):
 
-* `scans` — one row per scan: `started_at`, `finished_at`, `duration_sec`, the counters (discovered/full/descriptors_only/skipped/failed/removed), the configuration at the time (`workers`, `backend`, `model`, `forced`, `harmonie_version`, `descriptor_version`), and an outcome (`state` is `running` | `completed` | `crashed`, plus `last_error` on hard failures).
+* `scans` — one row per scan: `started_at`, `finished_at`, `duration_sec`, the counters (discovered/full/descriptors_only/skipped/failed/removed), the configuration at the time (`workers`, `model`, `forced`, `harmonie_version`, `descriptor_version`), and an outcome (`state` is `running` | `completed` | `crashed` | `cancelled`, plus `last_error` on hard failures). The `backend` column is kept for historical compat but always reads `effnet`.
 * `scan_failures` — one row per failed track per scan, linked to `scans.id` with `ON DELETE CASCADE`.
 
 If the process is killed mid-scan, the `scans` row is left in `state='running'`. The next `Analyzer()` instance marks any such rows as `crashed` on construction with a synthetic `finished_at` and a `last_error = 'interrupted before completion'`.

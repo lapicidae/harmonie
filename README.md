@@ -6,7 +6,7 @@
 
 Audio similarity service. Scans a music library, extracts a per-track embedding plus musical descriptors (BPM, key, loudness, danceability, onset rate), classifies each track against the 400 Discogs styles (House, Techno, Trap, Punk, ...), and reads file tags (artist, album, title, track number) using [Essentia](https://essentia.upf.edu/) and [mutagen](https://mutagen.readthedocs.io/). Everything is stored in SQLite and exposed via an HTTP API for similarity queries, style-filtered listings, and playlist generation.
 
-The default backend is Essentia's Discogs-Effnet model (1280-d embedding trained on Discogs tags). A lighter `MusicExtractor` backend is available for hosts without TensorFlow.
+Built around Essentia's Discogs-Effnet model — a 1280-d embedding trained on Discogs tags that captures genre / style / sonic character.
 
 Run it as a long-lived service. It rescans on a schedule and serves any HTTP client that wants similarity queries against the indexed catalog.
 
@@ -347,7 +347,6 @@ All settings come from environment variables (or a `.env` file in the working di
 | --- | --- | --- |
 | `HARMONIE_LIBRARIES` | (none) | Comma- or colon-separated absolute paths to scan |
 | `HARMONIE_DATA_DIR` | platform user-data dir | Where to put `harmonie.db`. Defaults to `~/.local/share/harmonie` on Linux, `~/Library/Application Support/harmonie` on macOS. |
-| `HARMONIE_BACKEND` | `effnet` | `effnet` or `musicextractor` |
 | `HARMONIE_WORKERS` | CPU count | Analysis worker processes |
 | `HARMONIE_SCAN_INTERVAL_HOURS` | `6` | Periodic scan interval (`0` disables) |
 | `HARMONIE_SCAN_ON_STARTUP` | `true` | Run a scan immediately on boot |

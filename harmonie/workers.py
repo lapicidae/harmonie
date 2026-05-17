@@ -14,9 +14,9 @@ import numpy as np
 from .features import (
     DESCRIPTOR_VERSION,
     Descriptors,
+    EffnetExtractor,
     TrackFeatures,
     file_signature,
-    get_extractor,
     top_styles,
 )
 from .tags import Tags, extract_tags
@@ -57,8 +57,8 @@ class FullResult:
     descriptor_version: int
     tags: Tags
     # Full 400-d Discogs activation vector and the top-K (label, prob)
-    # preview. Both ``None`` if the genre head was unavailable or the
-    # backend doesn't produce Effnet-compatible embeddings.
+    # preview. Both ``None`` if the genre head was unavailable at
+    # extraction time.
     style_activations: np.ndarray | None = None
     top_styles: list[tuple[str, float]] | None = None
 
@@ -87,19 +87,17 @@ WorkerResult = Union[FullResult, DescriptorResult, JobError]
 # ---------------------------------------------------------------------------
 
 _extractor = None
-_backend_name = ""
 
 
-def _worker_init(backend: str, log_level: str = "INFO") -> None:
-    """Run once per worker process. Loads the backend, configures logging,
+def _worker_init(log_level: str = "INFO") -> None:
+    """Run once per worker process. Loads the extractor, configures logging,
     and (for non-DEBUG levels) silences Essentia's
     ``[WARNING] No network created, or last created network has been
     deleted`` line that fires when the standard-mode TF wrapper destroys
     its internal streaming network.
     """
-    global _extractor, _backend_name
+    global _extractor
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-    _backend_name = backend
 
     # Spawn-mode workers don't inherit Python state from the parent, so
     # logging has to be configured here. Format matches the main
@@ -118,7 +116,7 @@ def _worker_init(backend: str, log_level: str = "INFO") -> None:
         except Exception:  # pragma: no cover - essentia not installed
             pass
 
-    _extractor = get_extractor(backend)
+    _extractor = EffnetExtractor()
 
 
 def _do_full(job: FullJob) -> WorkerResult:
@@ -181,22 +179,18 @@ class WorkerPool:
     def __init__(
         self,
         *,
-        backend: str,
         workers: int,
         log_level: str = "INFO",
     ) -> None:
-        self.backend = backend
         self.workers = max(1, workers)
         # 'spawn' avoids fork-after-thread issues with TensorFlow.
         ctx = mp.get_context("spawn")
         self._pool: mp.pool.Pool | None = ctx.Pool(
             processes=self.workers,
             initializer=_worker_init,
-            initargs=(backend, log_level),
+            initargs=(log_level,),
         )
-        logger.info(
-            "started worker pool: %d workers, backend=%s", self.workers, backend
-        )
+        logger.info("started worker pool: %d workers", self.workers)
 
     def map(self, jobs: list[FullJob | DescriptorJob], *, chunksize: int = 1):
         if self._pool is None:

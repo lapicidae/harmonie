@@ -19,18 +19,18 @@ def stub_essentia(monkeypatch):
 
 @pytest.fixture
 def stub_extractor(monkeypatch):
-    """Replace ``get_extractor`` with a sentinel."""
+    """Replace ``EffnetExtractor`` with a sentinel-returning factory."""
     from harmonie import workers as workers_mod
 
     sentinel = object()
-    monkeypatch.setattr(workers_mod, "get_extractor", lambda backend: sentinel)
+    monkeypatch.setattr(workers_mod, "EffnetExtractor", lambda: sentinel)
     return sentinel
 
 
 def test_worker_init_silences_essentia_warnings_at_info(stub_essentia, stub_extractor):
     from harmonie.workers import _worker_init
 
-    _worker_init("effnet", "INFO")
+    _worker_init("INFO")
     assert stub_essentia.log.warningActive is False
 
 
@@ -39,21 +39,21 @@ def test_worker_init_silences_essentia_warnings_at_warning(
 ):
     from harmonie.workers import _worker_init
 
-    _worker_init("effnet", "WARNING")
+    _worker_init("WARNING")
     assert stub_essentia.log.warningActive is False
 
 
 def test_worker_init_keeps_warnings_at_debug(stub_essentia, stub_extractor):
     from harmonie.workers import _worker_init
 
-    _worker_init("effnet", "DEBUG")
+    _worker_init("DEBUG")
     assert stub_essentia.log.warningActive is True
 
 
 def test_worker_init_debug_case_insensitive(stub_essentia, stub_extractor):
     from harmonie.workers import _worker_init
 
-    _worker_init("effnet", "debug")
+    _worker_init("debug")
     assert stub_essentia.log.warningActive is True
 
 

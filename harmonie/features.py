@@ -1,27 +1,20 @@
-"""Audio feature extraction using Essentia.
+"""Feature extraction.
 
-Each backend produces, for one audio file:
+For one audio file, :class:`EffnetExtractor` produces:
 
-* a fixed-length embedding (``np.ndarray`` of float32) for similarity search,
+* a 1280-d embedding (``np.ndarray`` of float32) for similarity search,
 * a :class:`Descriptors` block of musical metadata (BPM, key, loudness, …),
-* (effnet only) a 400-d Discogs style activation vector from a genre/style
-  classifier head running on top of the Effnet embeddings. ``None`` for
-  backends that don't produce embeddings in Discogs-Effnet space.
+* a 400-d Discogs style activation vector from a genre/style classifier
+  head running on top of the Effnet embeddings.
 
-Backends:
+Backed by ``essentia-tensorflow`` (the Discogs-Effnet model + classical
+descriptor algorithms run on the same decoded audio).
 
-* ``effnet`` (default): Discogs-Effnet 1280-d embedding via TensorFlow,
-  plus Essentia descriptor algorithms on the same decoded audio.
-  Requires ``essentia-tensorflow``.
+Two extraction modes:
 
-* ``musicextractor``: Essentia's :class:`MusicExtractor`. Embedding is an
-  aggregation of low-level descriptors. Requires only ``essentia``.
-
-Two extraction modes are supported per backend:
-
-* :meth:`Extractor.extract` returns embedding + descriptors + styles.
-* :meth:`Extractor.extract_descriptors` returns descriptors only. Used to
-  refresh descriptor columns without re-running TensorFlow.
+* :meth:`EffnetExtractor.extract` returns embedding + descriptors + styles.
+* :meth:`EffnetExtractor.extract_descriptors` returns descriptors only.
+  Used to refresh descriptor columns without re-running TensorFlow.
 """
 
 from __future__ import annotations
@@ -425,168 +418,17 @@ class EffnetExtractor:
 
 
 # ---------------------------------------------------------------------------
-# Backend: MusicExtractor
+# Public constants
 # ---------------------------------------------------------------------------
 
-_MUSIC_EXTRACTOR_KEYS: list[tuple[str, int]] = [
-    ("lowlevel.spectral_centroid.mean", 1),
-    ("lowlevel.spectral_centroid.stdev", 1),
-    ("lowlevel.spectral_rolloff.mean", 1),
-    ("lowlevel.spectral_rolloff.stdev", 1),
-    ("lowlevel.spectral_flux.mean", 1),
-    ("lowlevel.spectral_flux.stdev", 1),
-    ("lowlevel.spectral_complexity.mean", 1),
-    ("lowlevel.spectral_complexity.stdev", 1),
-    ("lowlevel.zerocrossingrate.mean", 1),
-    ("lowlevel.zerocrossingrate.stdev", 1),
-    ("lowlevel.mfcc.mean", 13),
-    ("lowlevel.mfcc.stdev", 13),
-    ("tonal.hpcp.mean", 36),
-    ("tonal.hpcp.stdev", 36),
-    ("tonal.chords_strength.mean", 1),
-    ("tonal.key_strength", 1),
-    ("rhythm.bpm", 1),
-    ("rhythm.danceability", 1),
-    ("rhythm.onset_rate", 1),
-    ("rhythm.beats_loudness.mean", 1),
-    ("rhythm.beats_loudness.stdev", 1),
-]
+# Persisted in tracks.model and scans.model. Bump alongside any change to
+# the embedding model (e.g. swap to a newer Discogs-Effnet checkpoint) so
+# old rows get re-extracted on the next scan.
+MODEL_NAME = EffnetExtractor.name
 
-
-class MusicExtractorBackend:
-    """Classical descriptor backend using Essentia's MusicExtractor."""
-
-    name = "musicextractor-v1"
-
-    def __init__(self) -> None:
-        try:
-            from essentia.standard import MusicExtractor
-        except ImportError as e:  # pragma: no cover
-            raise RuntimeError(
-                "The 'musicextractor' backend requires essentia. "
-                "Install with: pip install essentia"
-            ) from e
-        self._extractor = MusicExtractor(
-            lowlevelStats=["mean", "stdev"],
-            rhythmStats=["mean", "stdev"],
-            tonalStats=["mean", "stdev"],
-        )
-        self.dim = sum(n for _, n in _MUSIC_EXTRACTOR_KEYS)
-
-    @staticmethod
-    def _get(pool, key, default=None):
-        try:
-            return pool[key]
-        except KeyError:
-            return default
-
-    def _run(self, path: Path):
-        return self._extractor(str(path))
-
-    def _build_embedding(self, pool) -> np.ndarray:
-        parts: list[np.ndarray] = []
-        for key, expected in _MUSIC_EXTRACTOR_KEYS:
-            val = self._get(pool, key, 0.0)
-            arr = np.atleast_1d(np.asarray(val, dtype=np.float32))
-            if arr.size < expected:
-                arr = np.pad(arr, (0, expected - arr.size))
-            elif arr.size > expected:
-                arr = arr[:expected]
-            parts.append(arr)
-        emb = np.concatenate(parts).astype(np.float32, copy=False)
-        return np.nan_to_num(emb, nan=0.0, posinf=0.0, neginf=0.0)
-
-    def _build_descriptors(self, pool) -> Descriptors:
-        d = Descriptors()
-        bpm = self._get(pool, "rhythm.bpm")
-        if bpm is not None:
-            d.bpm = float(bpm)
-        bpm_conf = self._get(pool, "rhythm.bpm_confidence")
-        if bpm_conf is not None:
-            d.bpm_confidence = float(bpm_conf)
-        key = self._get(pool, "tonal.key_edma.key") or self._get(
-            pool, "tonal.key_krumhansl.key"
-        )
-        if key is not None:
-            d.key = str(key)
-        scale = self._get(pool, "tonal.key_edma.scale") or self._get(
-            pool, "tonal.key_krumhansl.scale"
-        )
-        if scale is not None:
-            d.scale = str(scale)
-        ks = self._get(pool, "tonal.key_edma.strength") or self._get(
-            pool, "tonal.key_krumhansl.strength"
-        )
-        if ks is not None:
-            d.key_strength = float(ks)
-        loud = self._get(pool, "lowlevel.average_loudness")
-        if loud is not None:
-            d.loudness = float(loud)
-        dance = self._get(pool, "rhythm.danceability")
-        if dance is not None:
-            d.danceability = float(dance)
-        onset = self._get(pool, "rhythm.onset_rate")
-        if onset is not None:
-            d.onset_rate = float(onset)
-        return d
-
-    def extract(self, path: Path) -> TrackFeatures:
-        features, _ = self._run(path)
-        emb = self._build_embedding(features)
-        descriptors = self._build_descriptors(features)
-        duration = float(self._get(features, "metadata.audio_properties.length", 0.0))
-        return TrackFeatures(
-            embedding=emb, duration=duration, model=self.name, descriptors=descriptors
-        )
-
-    def extract_descriptors(self, path: Path) -> tuple[Descriptors, float]:
-        features, _ = self._run(path)
-        descriptors = self._build_descriptors(features)
-        duration = float(self._get(features, "metadata.audio_properties.length", 0.0))
-        return descriptors, duration
-
-
-# ---------------------------------------------------------------------------
-# Public factory
-# ---------------------------------------------------------------------------
-
-Extractor = EffnetExtractor  # for type hints; both classes have the same API
-
-
-@dataclass(frozen=True)
-class BackendInfo:
-    """Lightweight metadata about a backend: just the model name and the
-    embedding dimensionality. Reading these doesn't import essentia,
-    download model files, or load TensorFlow.
-    """
-
-    name: str
-    dim: int
-
-
-def get_backend_info(backend: str = "effnet") -> BackendInfo:
-    """Return :class:`BackendInfo` for the given backend without
-    instantiating the extractor. The TF graph and model files are loaded
-    only inside worker processes on first scan.
-    """
-    backend = backend.lower()
-    if backend in ("effnet", "discogs-effnet", "tf"):
-        return BackendInfo(name=EffnetExtractor.name, dim=EFFNET_EMBEDDING_DIM)
-    if backend in ("musicextractor", "classic", "music"):
-        return BackendInfo(
-            name=MusicExtractorBackend.name,
-            dim=sum(n for _, n in _MUSIC_EXTRACTOR_KEYS),
-        )
-    raise ValueError(f"unknown backend: {backend}")
-
-
-def get_extractor(backend: str = "effnet"):
-    backend = backend.lower()
-    if backend in ("effnet", "discogs-effnet", "tf"):
-        return EffnetExtractor()
-    if backend in ("musicextractor", "classic", "music"):
-        return MusicExtractorBackend()
-    raise ValueError(f"unknown backend: {backend}")
+# Width of the embedding vector. Useful in the main process for sanity
+# checks without importing essentia / loading TensorFlow.
+EMBEDDING_DIM = EFFNET_EMBEDDING_DIM
 
 
 # ---------------------------------------------------------------------------

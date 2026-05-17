@@ -317,7 +317,6 @@ class ServiceStatus(BaseModel):
 
     # Service identity.
     version: str
-    backend: str
     embedding_dim: int
     libraries: list[str]
     workers: int

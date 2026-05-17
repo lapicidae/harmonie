@@ -43,9 +43,8 @@ _STATEMENTS = [
         track_number          INTEGER,
         -- Full 400-d Discogs style activation vector (float32 BLOB) from
         -- the genre classifier head. Top-K labels broken out into the
-        -- track_styles table for fast filtering. NULL = no styles extracted
-        -- (e.g. musicextractor backend, or the head was unavailable at
-        -- scan time).
+        -- track_styles table for fast filtering. NULL = the head was
+        -- unavailable at scan time.
         style_activations     BLOB,
         analyzed_at           REAL    NOT NULL
     )

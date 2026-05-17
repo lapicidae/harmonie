@@ -232,7 +232,6 @@ class TestHealthAndInfo:
         # Identity / config (was /info).
         assert {
             "version",
-            "backend",
             "libraries",
             "schema_version",
             "descriptor_version",

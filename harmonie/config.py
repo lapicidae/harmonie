@@ -59,7 +59,6 @@ class Settings(BaseSettings):
     db_filename: str = Field(default="harmonie.db")
 
     # Analysis -----------------------------------------------------------
-    backend: str = Field(default="effnet", description="effnet | musicextractor")
     workers: int = Field(default=0, description="0 = use CPU count.")
 
     # Scheduling ---------------------------------------------------------
@@ -96,14 +95,6 @@ class Settings(BaseSettings):
             return []
         if isinstance(v, str):
             return [s.strip() for s in v.split(",") if s.strip()]
-        return v
-
-    @field_validator("backend")
-    @classmethod
-    def _normalize_backend(cls, v: str) -> str:
-        v = v.lower().strip()
-        if v not in {"effnet", "musicextractor"}:
-            raise ValueError(f"backend must be 'effnet' or 'musicextractor', got {v!r}")
         return v
 
     @field_validator("log_level")

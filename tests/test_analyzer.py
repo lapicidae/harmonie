@@ -195,7 +195,7 @@ def test_scan_writes_scans_row(harness):
     row = rows[0]
     assert row["state"] == "completed"
     assert row["workers"] == analyzer.settings.worker_count
-    assert row["backend"] == analyzer.settings.backend
+    assert row["backend"] == "effnet"
     assert row["model"] == analyzer.model_name
     assert row["forced"] == 0
     assert row["finished_at"] is not None

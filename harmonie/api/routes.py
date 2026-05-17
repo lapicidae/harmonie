@@ -232,7 +232,6 @@ def get_status(analyzer: Analyzer = Depends(get_analyzer)) -> ServiceStatus:
     s = analyzer.db.stats()
     return ServiceStatus(
         version=__version__,
-        backend=settings.backend,
         embedding_dim=analyzer.embedding_dim,
         libraries=[str(p) for p in settings.libraries],
         workers=settings.worker_count,
