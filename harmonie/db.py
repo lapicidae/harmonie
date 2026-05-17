@@ -32,8 +32,8 @@ from .features import Descriptors
 from .migrations import run_migrations
 from .tags import Tags
 
-# Schema lives in :mod:`harmonie.migrations` — see migrations.py for the
-# canonical definition and the rules for adding a new migration.
+# Schema lives in :mod:`harmonie.migrations` — see migrations/__init__.py
+# for the canonical definition and the rules for adding a new migration.
 
 
 # ---------------------------------------------------------------------------
