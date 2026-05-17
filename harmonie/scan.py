@@ -43,6 +43,24 @@ def _is_skippable_file(name: str) -> bool:
     return name.startswith(".")
 
 
+def _candidate_paths(root: Path) -> Iterator[Path]:
+    """Yield every file path under ``root`` the walker should consider.
+
+    A root that's itself a file is yielded as-is. A root that's a
+    directory is walked recursively; symlinks are not followed and
+    hidden directories are pruned. The caller still has to apply
+    audio-extension and dedupe filters — this helper just produces
+    candidates.
+    """
+    if root.is_file():
+        yield root
+        return
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for name in filenames:
+            yield Path(dirpath) / name
+
+
 def iter_audio_files(roots: Iterable[Path]) -> Iterator[Path]:
     """Yield audio files under each root, recursively. Roots may be files
     or directories. Hidden directories and dot-prefixed files (including
@@ -54,24 +72,14 @@ def iter_audio_files(roots: Iterable[Path]) -> Iterator[Path]:
         root = Path(root).expanduser()
         if not root.exists():
             continue
-        if root.is_file():
-            if not _is_skippable_file(root.name) and is_audio_file(root):
-                key = os.path.realpath(root)
-                if key not in seen:
-                    seen.add(key)
-                    yield root
-            continue
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
-            for name in filenames:
-                if _is_skippable_file(name):
-                    continue
-                p = Path(dirpath) / name
-                if is_audio_file(p):
-                    key = os.path.realpath(p)
-                    if key not in seen:
-                        seen.add(key)
-                        yield p
+        for path in _candidate_paths(root):
+            if _is_skippable_file(path.name) or not is_audio_file(path):
+                continue
+            key = os.path.realpath(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield path
 
 
 def split_library_path(
