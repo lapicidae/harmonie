@@ -53,13 +53,13 @@ Reference points:
 Watch progress:
 
 ```bash
-curl http://localhost:8842/api/v1/scan
+curl http://localhost:8842/api/v1/scan | json_pp
 ```
 
 Trigger another scan:
 
 ```bash
-curl -X POST http://localhost:8842/api/v1/scan
+curl -X POST http://localhost:8842/api/v1/scan | json_pp
 ```
 
 Subsequent scans are incremental. Only files whose size or mtime changed get re-extracted.
@@ -137,11 +137,11 @@ Track and match responses include the metadata you need to look a track up in an
 curl --get http://localhost:8842/api/v1/tracks/resolve \
   --data-urlencode 'artist=Aphex Twin' \
   --data-urlencode 'album=SAW' \
-  --data-urlencode 'title=Xtal'
+  --data-urlencode 'title=Xtal' | json_pp
 
 # By path (works against the absolute path or relative_path).
 curl --get http://localhost:8842/api/v1/tracks/resolve \
-  --data-urlencode 'path=Aphex Twin/SAW/01 Xtal.flac'
+  --data-urlencode 'path=Aphex Twin/SAW/01 Xtal.flac' | json_pp
 ```
 
 400 on an empty request, 404 if no strategy matches.
@@ -152,21 +152,21 @@ During scan, harmonie runs Essentia's Discogs-400 classifier head on the same Ef
 
 ```bash
 # Filter tracks by exact style.
-curl 'http://localhost:8842/api/v1/tracks?style=Electronic---House'
+curl 'http://localhost:8842/api/v1/tracks?style=Electronic---House' | json_pp
 
 # Prefix match: every Electronic style.
-curl --get 'http://localhost:8842/api/v1/tracks' --data-urlencode 'style=Electronic'
+curl --get 'http://localhost:8842/api/v1/tracks' --data-urlencode 'style=Electronic' | json_pp
 
 # Multiple styles. Default match is "any"; use style_mode=all for AND.
 curl --get 'http://localhost:8842/api/v1/tracks' \
   --data-urlencode 'style=Electronic---House' \
-  --data-urlencode 'style=Electronic---Techno'
+  --data-urlencode 'style=Electronic---Techno' | json_pp
 
 # Demand confidence: only count style rows above 0.5 probability.
-curl 'http://localhost:8842/api/v1/tracks?style=Electronic&style_min=0.5'
+curl 'http://localhost:8842/api/v1/tracks?style=Electronic&style_min=0.5' | json_pp
 
 # Enumerate styles present in the library.
-curl 'http://localhost:8842/api/v1/styles?style_min=0.5'
+curl 'http://localhost:8842/api/v1/styles?style_min=0.5' | json_pp
 ```
 
 ### Playlists
@@ -191,7 +191,7 @@ The seeds anchor the playlist; results stay close to their embedding centroid. T
 # Minimum: 20 tracks similar to track 42.
 curl -X POST http://localhost:8842/api/v1/playlists \
   -H 'content-type: application/json' \
-  -d '{"mode": "similar", "seeds": [42]}'
+  -d '{"mode": "similar", "seeds": [42]}' | json_pp
 
 # Tighter: multi-seed, smooth transitions, hard filter, include the seeds.
 curl -X POST http://localhost:8842/api/v1/playlists \
@@ -203,7 +203,7 @@ curl -X POST http://localhost:8842/api/v1/playlists \
     "smooth_transitions": { "bpm_tolerance": 5, "key_compatible": true },
     "filter": { "bpm": { "gte": 120, "lte": 140 }, "style_min": 0.3 },
     "include_seeds": true
-  }'
+  }' | json_pp
 ```
 
 **Endless radio.** The endpoint returns a fixed `n`. To keep going, re-seed from the tail of the previous response:
@@ -216,7 +216,7 @@ seed=$(curl -sX POST http://localhost:8842/api/v1/playlists \
 # Next batch is "music like the last 3 tracks of the previous batch."
 curl -X POST http://localhost:8842/api/v1/playlists \
   -H 'content-type: application/json' \
-  -d "{\"mode\":\"similar\",\"seeds\":$seed,\"n\":20}"
+  -d "{\"mode\":\"similar\",\"seeds\":$seed,\"n\":20}" | json_pp
 ```
 
 #### Mode `drift`: chunked walk
@@ -232,7 +232,7 @@ curl -X POST http://localhost:8842/api/v1/playlists \
     "n": 30,
     "chunk_size": 5,
     "smooth_transitions": { "key_compatible": true }
-  }'
+  }' | json_pp
 ```
 
 Tuning `chunk_size`:
@@ -258,7 +258,7 @@ curl -X POST http://localhost:8842/api/v1/playlists \
     "target": { "bpm": 128, "danceability": 1.5 },
     "shuffle": true,
     "rng_seed": 42
-  }'
+  }' | json_pp
 ```
 
 #### Inline path or tag references
@@ -276,7 +276,7 @@ curl -X POST http://localhost:8842/api/v1/playlists \
       { "artist": "Aphex Twin", "album": "Selected Ambient Works", "title": "Xtal" },
       { "artist": "Daft Punk", "title": "One More Time" }
     ]
-  }'
+  }' | json_pp
 ```
 
 Harmonie resolves each ref server-side via the same ladder as `/tracks/resolve` (exact path, then `relative_path`, then `artist+album+title`, then `title+artist` or `title+album`). Refs that don't match a track come back under `unresolved_seed_refs`:
@@ -318,7 +318,7 @@ The bare-minimum body for `similar`/`drift` (`mode` and `seeds`) returns 20 trac
 
 ```bash
 # Trigger a scan and watch its progress.
-curl -X POST 'http://localhost:8842/api/v1/scan?force=true'
+curl -X POST 'http://localhost:8842/api/v1/scan?force=true' | json_pp
 while [ "$(curl -sS http://localhost:8842/api/v1/scan | jq -r .state)" != "idle" ]; do
   sleep 5
 done
@@ -326,7 +326,7 @@ done
 # Find every Hard Techno track at 140+ BPM, sorted by BPM ascending.
 curl --get http://localhost:8842/api/v1/tracks \
   --data-urlencode 'style=Electronic---Hard Techno' \
-  --data 'bpm=140..' --data 'order_by=bpm'
+  --data 'bpm=140..' --data 'order_by=bpm' | json_pp
 
 # Resolve a track by tags, then ask for 20 similar with key compatibility.
 id=$(curl --get http://localhost:8842/api/v1/tracks/resolve \
@@ -335,7 +335,7 @@ id=$(curl --get http://localhost:8842/api/v1/tracks/resolve \
 curl -X POST http://localhost:8842/api/v1/playlists \
   -H 'content-type: application/json' \
   -d "{\"mode\":\"similar\",\"seeds\":[$id],\"n\":20,
-       \"smooth_transitions\":{\"key_compatible\":true}}"
+       \"smooth_transitions\":{\"key_compatible\":true}}" | json_pp
 ```
 
 ## Configuration
