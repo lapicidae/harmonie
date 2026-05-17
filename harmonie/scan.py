@@ -28,9 +28,25 @@ def is_audio_file(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS
 
 
+def _is_skippable_file(name: str) -> bool:
+    """True for filenames the walker should pretend don't exist.
+
+    Currently this is any dot-prefixed name (``._track.flac``,
+    ``.DS_Store``, etc.). The most common offenders are macOS
+    AppleDouble files: when macOS writes to a non-HFS+ filesystem
+    (SMB/CIFS, USB, NTFS, exFAT) it stores extended attributes and
+    resource forks in a sibling file with a ``._`` prefix. Those
+    sibling files share the audio extension of the real file but
+    aren't audio themselves; trying to decode them is guaranteed to
+    fail.
+    """
+    return name.startswith(".")
+
+
 def iter_audio_files(roots: Iterable[Path]) -> Iterator[Path]:
     """Yield audio files under each root, recursively. Roots may be files
-    or directories. Hidden directories are skipped, symlinks are not
+    or directories. Hidden directories and dot-prefixed files (including
+    macOS AppleDouble ``._*`` metadata) are skipped, symlinks are not
     followed, and results are de-duplicated by realpath.
     """
     seen: set[str] = set()
@@ -39,7 +55,7 @@ def iter_audio_files(roots: Iterable[Path]) -> Iterator[Path]:
         if not root.exists():
             continue
         if root.is_file():
-            if is_audio_file(root):
+            if not _is_skippable_file(root.name) and is_audio_file(root):
                 key = os.path.realpath(root)
                 if key not in seen:
                     seen.add(key)
@@ -48,6 +64,8 @@ def iter_audio_files(roots: Iterable[Path]) -> Iterator[Path]:
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             dirnames[:] = [d for d in dirnames if not d.startswith(".")]
             for name in filenames:
+                if _is_skippable_file(name):
+                    continue
                 p = Path(dirpath) / name
                 if is_audio_file(p):
                     key = os.path.realpath(p)

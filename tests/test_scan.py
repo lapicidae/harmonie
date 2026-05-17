@@ -33,6 +33,30 @@ def test_iter_recursive_and_dedupes(tmp_path: Path):
     assert found == ["a.flac", "b.mp3", "c.wav"]
 
 
+def test_iter_skips_dot_prefixed_files(tmp_path: Path):
+    """macOS writes ``._foo.flac`` AppleDouble companion files when
+    storing on non-HFS+ filesystems (SMB/CIFS, USB, NTFS). They share
+    the audio extension but contain extended attributes, not audio.
+    The walker must skip them — and any other dot-prefixed file."""
+    (tmp_path / "good.flac").write_text("audio")
+    # AppleDouble companion to good.flac.
+    (tmp_path / "._good.flac").write_text("metadata")
+    # Other dot-prefixed files we never want to feed to the analyzer.
+    (tmp_path / "._cover.flac").write_text("metadata")
+    (tmp_path / ".DS_Store").write_text("nope")
+    # Single audio file as a root (not a directory) — skip rule applies
+    # there too.
+    (tmp_path / "._direct.mp3").write_text("metadata")
+
+    found = sorted(p.name for p in iter_audio_files([tmp_path]))
+    assert found == ["good.flac"]
+
+    # Passing the AppleDouble file directly as a root must also yield
+    # nothing.
+    direct = list(iter_audio_files([tmp_path / "._direct.mp3"]))
+    assert direct == []
+
+
 def test_iter_handles_missing_root(tmp_path: Path):
     found = list(iter_audio_files([tmp_path / "does-not-exist"]))
     assert found == []
