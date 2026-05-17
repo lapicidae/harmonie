@@ -13,7 +13,10 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import os
+import signal
 import sys
 from pathlib import Path
 
@@ -135,10 +138,6 @@ def _install_cancel_handler(analyzer) -> None:
     don't always wake up promptly on a signal, so we explicitly call
     :meth:`Analyzer.request_cancel` (which terminates the worker pool)
     from inside the handler."""
-    import contextlib
-    import os
-    import signal
-
     received = {"count": 0}
 
     def handler(signum, frame):  # noqa: ARG001
@@ -161,8 +160,6 @@ def _install_cancel_handler(analyzer) -> None:
 def cmd_scan(args: argparse.Namespace) -> int:
     settings = get_settings()
     configure_logging(settings)
-    import contextlib
-
     from .analyzer import Analyzer
 
     analyzer = Analyzer(settings)
