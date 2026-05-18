@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     workers: int = Field(default=0, description="0 = use CPU count.")
 
     # Scheduling ---------------------------------------------------------
-    scan_interval_hours: float = Field(default=6.0, ge=0)
+    scan_interval_hours: float = Field(default=24.0, ge=0)
     scan_on_startup: bool = Field(default=True)
 
     # HTTP API -----------------------------------------------------------

@@ -82,7 +82,7 @@ All settings come from environment variables (or a `.env` file in the working di
 | `HARMONIE_LIBRARIES` | (none) | Comma- or colon-separated absolute paths to scan |
 | `HARMONIE_DATA_DIR` | platform user-data dir | Where to put `harmonie.db`. Defaults to `~/.local/share/harmonie` on Linux, `~/Library/Application Support/harmonie` on macOS. |
 | `HARMONIE_WORKERS` | CPU count | Analysis worker processes. Each worker peaks around 1 GB of RAM during extraction of long files (10+ minute classical recordings, etc.), so set this conservatively on RAM-constrained boxes. |
-| `HARMONIE_SCAN_INTERVAL_HOURS` | `6` | Periodic scan interval (`0` disables) |
+| `HARMONIE_SCAN_INTERVAL_HOURS` | `24` | Periodic scan interval (`0` disables) |
 | `HARMONIE_SCAN_ON_STARTUP` | `true` | Run a scan immediately on boot |
 | `HARMONIE_HOST` | `0.0.0.0` | HTTP bind address |
 | `HARMONIE_PORT` | `8842` | HTTP port |
