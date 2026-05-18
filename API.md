@@ -119,6 +119,17 @@ curl 'http://localhost:8842/api/v1/styles?style_min=0.5' | json_pp
 | "A long mix that gradually changes style" | `drift` |
 | "Tracks at ~128 BPM, danceable, electronic, shuffled" | `vibe` with `filter` + `target` |
 
+#### Common parameters
+
+These apply to every mode:
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `n` | `20` | How many tracks to return (1–500). |
+| `filter` | _(none)_ | Hard candidate-pool gate. See [Filters](#filters). |
+| `max_per_artist` | `2` | Cap on tracks from a single artist. Tracks with no `artist` tag are always admitted. The cap relaxes automatically when the candidate pool can't satisfy it (better to ship a longer playlist with some repetition than a short one). Set to `null` to disable. |
+| `dedupe_titles` | `true` | Skip tracks whose `(artist, title)` tag pair already appeared earlier in the playlist — same song from multiple albums or compilations shows up only once. Comparison is case-insensitive and whitespace-trimmed. Set to `false` to keep duplicates. |
+
 #### Mode `similar`: track radio
 
 The seeds anchor the playlist; results stay close to their embedding centroid. This is the "Track Radio" surface.

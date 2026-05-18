@@ -628,3 +628,54 @@ def test_scan_failures_cascade_on_scan_delete(tmp_db_path):
         assert rows == []
     finally:
         db.close()
+
+
+def test_artist_title_by_id_for_model_returns_tag_pairs(
+    tmp_db_path, random_embedding, fake_descriptors
+):
+    """Bulk lookup used by the playlist-diversity logic. Returns
+    (artist, title) per track id, with None for tracks missing tags."""
+    from harmonie.tags import Tags
+
+    db = Database(tmp_db_path)
+    try:
+        tagged = db.upsert_track(
+            path="/lib/a.flac",
+            size=1,
+            mtime=1.0,
+            duration=1.0,
+            embedding=random_embedding(dim=4),
+            model="m1",
+            descriptors=fake_descriptors(),
+            descriptor_version=DESCRIPTOR_VERSION,
+            tags=Tags(artist="Aphex Twin", title="Xtal"),
+        )
+        untagged = db.upsert_track(
+            path="/lib/b.flac",
+            size=1,
+            mtime=1.0,
+            duration=1.0,
+            embedding=random_embedding(dim=4),
+            model="m1",
+            descriptors=fake_descriptors(),
+            descriptor_version=DESCRIPTOR_VERSION,
+        )
+        # Track in a different model must not bleed into the result.
+        db.upsert_track(
+            path="/lib/c.flac",
+            size=1,
+            mtime=1.0,
+            duration=1.0,
+            embedding=random_embedding(dim=4),
+            model="other-model",
+            descriptors=fake_descriptors(),
+            descriptor_version=DESCRIPTOR_VERSION,
+            tags=Tags(artist="Other", title="Other"),
+        )
+
+        result = db.artist_title_by_id_for_model("m1")
+        assert result[tagged] == ("Aphex Twin", "Xtal")
+        assert result[untagged] == (None, None)
+        assert len(result) == 2  # excluded the other-model track
+    finally:
+        db.close()

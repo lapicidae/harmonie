@@ -19,6 +19,7 @@ from ..playlist import (
     ChainedPlaylistRequest,
     SimilarPlaylistRequest,
     VibePlaylistRequest,
+    _DiversityPolicy,
     generate_chained_playlist,
     generate_similar_playlist,
     generate_vibe_playlist,
@@ -433,6 +434,10 @@ def make_playlist(
         merged_seed_ids = []
 
     try:
+        diversity = _DiversityPolicy(
+            max_per_artist=body.max_per_artist,
+            dedupe_titles=body.dedupe_titles,
+        )
         if isinstance(body, SimilarPlaylist):
             items = generate_similar_playlist(
                 db,
@@ -444,6 +449,7 @@ def make_playlist(
                     harmonic_mix=body.smooth_transitions.key_compatible,
                     descriptor_filter=descriptor_filter,
                     include_seeds=body.include_seeds,
+                    diversity=diversity,
                 ),
             )
         elif isinstance(body, DriftPlaylist):
@@ -458,6 +464,7 @@ def make_playlist(
                     include_seed=body.include_seeds,
                     bpm_drift=body.smooth_transitions.bpm_tolerance,
                     harmonic_mix=body.smooth_transitions.key_compatible,
+                    diversity=diversity,
                 ),
             )
         elif isinstance(body, VibePlaylist):
@@ -470,6 +477,7 @@ def make_playlist(
                     target_danceability=body.target.danceability,
                     shuffle=body.shuffle,
                     seed=body.rng_seed,
+                    diversity=diversity,
                 ),
             )
         else:  # pragma: no cover - exhaustive

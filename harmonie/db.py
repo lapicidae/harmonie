@@ -548,6 +548,18 @@ class Database:
         )
         return {int(r["id"]): (r["bpm"], r["key"], r["scale"]) for r in cur}
 
+    def artist_title_by_id_for_model(
+        self, model: str
+    ) -> dict[int, tuple[str | None, str | None]]:
+        """Return ``{track_id: (artist, title)}`` for one model. Used by the
+        playlist generators to enforce per-artist diversity and same-song
+        deduplication without per-track DB lookups."""
+        cur = self._conn.execute(
+            "SELECT id, artist, title FROM tracks WHERE model = ?",
+            (model,),
+        )
+        return {int(r["id"]): (r["artist"], r["title"]) for r in cur}
+
     # -- styles --------------------------------------------------------
 
     def get_track_styles(self, track_id: int) -> list[tuple[str, float]]:

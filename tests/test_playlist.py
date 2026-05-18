@@ -50,7 +50,10 @@ def test_compatible_keys_for_round_trip():
 # ---------------------------------------------------------------------------
 
 
-def _add(db, path, emb, descriptors, model="m1"):
+def _add(db, path, emb, descriptors, model="m1", *, artist=None, title=None):
+    from harmonie.tags import Tags
+
+    tags = Tags(artist=artist, title=title) if (artist or title) else None
     return db.upsert_track(
         path=path,
         size=1,
@@ -60,6 +63,7 @@ def _add(db, path, emb, descriptors, model="m1"):
         model=model,
         descriptors=descriptors,
         descriptor_version=DESCRIPTOR_VERSION,
+        tags=tags,
     )
 
 
@@ -483,3 +487,312 @@ def test_chained_multiseed_include_seed_emits_each(make_db, fake_descriptors):
     assert items[1].track_id == sid_y
     # No duplicates.
     assert len({m.track_id for m in items}) == 6
+
+
+# ---------------------------------------------------------------------------
+# Diversity (artist cap + title dedup)
+# ---------------------------------------------------------------------------
+
+
+class TestDiversityState:
+    """Unit tests for the helper that decides which candidates are admissible."""
+
+    def _state(self, **policy):
+        from harmonie.playlist import _DiversityPolicy, _DiversityState
+
+        return _DiversityState(_DiversityPolicy(**policy))
+
+    def test_default_caps_at_two_per_artist(self):
+        s = self._state()
+        assert s.admit("Aphex Twin", "Xtal") == "ok"
+        s.record("Aphex Twin", "Xtal")
+        assert s.admit("Aphex Twin", "Tha") == "ok"
+        s.record("Aphex Twin", "Tha")
+        assert s.admit("Aphex Twin", "Heliosphan") == "over-cap"
+
+    def test_default_dedupes_same_artist_title(self):
+        s = self._state()
+        s.record("Aphex Twin", "Xtal")
+        # Same song, different file — caught even though artist still has slack.
+        assert s.admit("Aphex Twin", "Xtal") == "duplicate"
+
+    def test_normalisation_is_case_insensitive_and_trimmed(self):
+        s = self._state()
+        s.record("Aphex Twin", "Xtal")
+        # Same song with different casing/spacing.
+        assert s.admit("aphex twin", "  XTAL  ") == "duplicate"
+
+    def test_null_artist_is_always_admissible(self):
+        s = self._state(max_per_artist=1)
+        s.record(None, "Untitled A")
+        # Cap can't apply without an artist key — admit and don't increment.
+        assert s.admit(None, "Untitled B") == "ok"
+
+    def test_disabled_policy_admits_everything(self):
+        from harmonie.playlist import _DiversityPolicy, _DiversityState
+
+        s = _DiversityState(_DiversityPolicy.disabled())
+        for _ in range(5):
+            s.record("Aphex Twin", "Xtal")
+        assert s.admit("Aphex Twin", "Xtal") == "ok"
+
+    def test_dedupe_disabled_lets_repeats_through(self):
+        s = self._state(dedupe_titles=False, max_per_artist=10)
+        s.record("Aphex Twin", "Xtal")
+        assert s.admit("Aphex Twin", "Xtal") == "ok"
+
+    def test_cap_disabled_lets_artist_dominate(self):
+        s = self._state(max_per_artist=None)
+        for _ in range(3):
+            s.record("Aphex Twin", f"track-{_}")
+        assert s.admit("Aphex Twin", "track-4") == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Diversity end-to-end: each generator respects the policy
+# ---------------------------------------------------------------------------
+
+
+def _seed_diverse_library(make_db, fake_descriptors):
+    """Build a library with 1 seed + 4 artists × 3 tracks = 12 candidates.
+    Enough variety that an n=6 playlist with cap=2 can be fully diverse
+    without triggering the relaxation pass."""
+    db, index = make_db()
+    rng = np.random.default_rng(0)
+    seed_emb = rng.standard_normal(8).astype(np.float32)
+    seed = _add(
+        db, "/seed.flac", seed_emb, fake_descriptors(), artist="Seed", title="Seed"
+    )
+    for artist_idx, artist in enumerate(["A", "B", "C", "D"]):
+        # Vary the noise so each artist's tracks land at slightly different
+        # similarities to the seed; ensures the pick order is meaningful.
+        scale = 0.03 + artist_idx * 0.02
+        for track_idx in range(3):
+            v = seed_emb + scale * rng.standard_normal(8).astype(np.float32)
+            _add(
+                db,
+                f"/{artist}/{track_idx}.flac",
+                v,
+                fake_descriptors(),
+                artist=artist,
+                title=f"{artist}-track-{track_idx}",
+            )
+    return db, index, seed
+
+
+class TestSimilarPlaylistDiversity:
+    def test_artist_cap_respected_when_pool_has_variety(
+        self, make_db, fake_descriptors
+    ):
+        db, index, seed = _seed_diverse_library(make_db, fake_descriptors)
+        items = generate_similar_playlist(
+            db, index, SimilarPlaylistRequest(seed_ids=[seed], n=6)
+        )
+        # 6 picks across 4 artists with cap=2: every artist appears ≤ 2.
+        assert len(items) == 6
+        artists = [db.get_track_by_id(m.track_id)["artist"] for m in items]
+        for a in set(artists):
+            assert artists.count(a) <= 2
+
+    def test_cap_relaxes_when_pool_lacks_variety(self, make_db, fake_descriptors):
+        """Library where only one artist has enough tracks — cap relaxes
+        instead of returning a short playlist."""
+        from harmonie.playlist import _DiversityPolicy
+
+        db, index = make_db()
+        rng = np.random.default_rng(1)
+        seed_emb = rng.standard_normal(8).astype(np.float32)
+        seed = _add(
+            db, "/seed.flac", seed_emb, fake_descriptors(), artist="X", title="seed"
+        )
+        # Only one artist in the pool, plenty of tracks.
+        for i in range(10):
+            v = seed_emb + 0.05 * rng.standard_normal(8).astype(np.float32)
+            _add(
+                db,
+                f"/x/{i}.flac",
+                v,
+                fake_descriptors(),
+                artist="OneArtist",
+                title=f"t{i}",
+            )
+
+        items = generate_similar_playlist(
+            db,
+            index,
+            SimilarPlaylistRequest(
+                seed_ids=[seed], n=5, diversity=_DiversityPolicy(max_per_artist=2)
+            ),
+        )
+        # Cap relaxed — we got the full 5 even though they're all OneArtist.
+        assert len(items) == 5
+
+    def test_dedupes_same_song_across_albums(self, make_db, fake_descriptors):
+        """Same (artist, title) on three different paths: only one gets in."""
+        db, index = make_db()
+        rng = np.random.default_rng(2)
+        seed_emb = rng.standard_normal(8).astype(np.float32)
+        seed = _add(
+            db, "/seed.flac", seed_emb, fake_descriptors(), artist="S", title="seed"
+        )
+        # Same song on three different "albums".
+        for i in range(3):
+            v = seed_emb + 0.02 * rng.standard_normal(8).astype(np.float32)
+            _add(
+                db,
+                f"/album-{i}/track.flac",
+                v,
+                fake_descriptors(),
+                artist="Aphex Twin",
+                title="Xtal",
+            )
+        # And a few different songs by other artists so the playlist can fill.
+        for i in range(5):
+            v = seed_emb + 0.1 * rng.standard_normal(8).astype(np.float32)
+            _add(
+                db,
+                f"/other/{i}.flac",
+                v,
+                fake_descriptors(),
+                artist=f"Artist{i}",
+                title=f"Song{i}",
+            )
+
+        items = generate_similar_playlist(
+            db, index, SimilarPlaylistRequest(seed_ids=[seed], n=5)
+        )
+        # Only one Xtal across the result, regardless of how many albums had it.
+        xtals = [m for m in items if db.get_track_by_id(m.track_id)["title"] == "Xtal"]
+        assert len(xtals) == 1
+
+
+class TestChainedPlaylistDiversity:
+    def test_artist_cap_respected_across_chunks(self, make_db, fake_descriptors):
+        from harmonie.playlist import ChainedPlaylistRequest, generate_chained_playlist
+
+        db, index, seed = _seed_diverse_library(make_db, fake_descriptors)
+        items = generate_chained_playlist(
+            db,
+            index,
+            ChainedPlaylistRequest(seed_ids=[seed], chunk_size=3, n=6),
+        )
+        artists = [db.get_track_by_id(m.track_id)["artist"] for m in items]
+        for a in set(artists):
+            assert artists.count(a) <= 2
+
+    def test_dedupes_same_song(self, make_db, fake_descriptors):
+        from harmonie.playlist import ChainedPlaylistRequest, generate_chained_playlist
+
+        db, index = make_db()
+        rng = np.random.default_rng(3)
+        seed_emb = rng.standard_normal(8).astype(np.float32)
+        seed = _add(
+            db, "/seed.flac", seed_emb, fake_descriptors(), artist="S", title="seed"
+        )
+        # Three duplicates of the same song + variety filler.
+        for i in range(3):
+            _add(
+                db,
+                f"/dup-{i}.flac",
+                seed_emb + 0.02 * rng.standard_normal(8).astype(np.float32),
+                fake_descriptors(),
+                artist="Aphex Twin",
+                title="Xtal",
+            )
+        for i in range(5):
+            _add(
+                db,
+                f"/other/{i}.flac",
+                seed_emb + 0.1 * rng.standard_normal(8).astype(np.float32),
+                fake_descriptors(),
+                artist=f"Artist{i}",
+                title=f"S{i}",
+            )
+
+        items = generate_chained_playlist(
+            db, index, ChainedPlaylistRequest(seed_ids=[seed], chunk_size=3, n=5)
+        )
+        xtal_ids = [
+            m.track_id
+            for m in items
+            if db.get_track_by_id(m.track_id)["title"] == "Xtal"
+        ]
+        assert len(xtal_ids) == 1
+
+
+class TestVibePlaylistDiversity:
+    def test_artist_cap_respected(self, make_db, fake_descriptors):
+        db, index = make_db()
+        rng = np.random.default_rng(4)
+        # Four artists × 3 tracks each — enough variety for cap=2 on n=6.
+        for artist in ["A", "B", "C", "D"]:
+            for i in range(3):
+                _add(
+                    db,
+                    f"/{artist}/{i}.flac",
+                    rng.standard_normal(4).astype(np.float32),
+                    fake_descriptors(bpm=120),
+                    artist=artist,
+                    title=f"{artist}-{i}",
+                )
+        items = generate_vibe_playlist(
+            db, VibePlaylistRequest(n=6, shuffle=False), model="m1"
+        )
+        artists = [db.get_track_by_id(m.track_id)["artist"] for m in items]
+        for a in set(artists):
+            assert artists.count(a) <= 2
+
+    def test_dedupes_titles(self, make_db, fake_descriptors):
+        db, index = make_db()
+        rng = np.random.default_rng(5)
+        # Same song three times.
+        for i in range(3):
+            _add(
+                db,
+                f"/dup-{i}.flac",
+                rng.standard_normal(4).astype(np.float32),
+                fake_descriptors(),
+                artist="Aphex Twin",
+                title="Xtal",
+            )
+        # Plus variety so the playlist can fill.
+        for i in range(5):
+            _add(
+                db,
+                f"/v-{i}.flac",
+                rng.standard_normal(4).astype(np.float32),
+                fake_descriptors(),
+                artist=f"A{i}",
+                title=f"S{i}",
+            )
+        items = generate_vibe_playlist(
+            db, VibePlaylistRequest(n=5, shuffle=False), model="m1"
+        )
+        xtal_count = sum(
+            1 for m in items if db.get_track_by_id(m.track_id)["title"] == "Xtal"
+        )
+        assert xtal_count == 1
+
+    def test_disabled_policy_keeps_all_entries(self, make_db, fake_descriptors):
+        from harmonie.playlist import _DiversityPolicy
+
+        db, _index = make_db()
+        rng = np.random.default_rng(6)
+        for i in range(5):
+            _add(
+                db,
+                f"/dup-{i}.flac",
+                rng.standard_normal(4).astype(np.float32),
+                fake_descriptors(),
+                artist="Aphex Twin",
+                title="Xtal",  # all the same song
+            )
+        items = generate_vibe_playlist(
+            db,
+            VibePlaylistRequest(
+                n=5, shuffle=False, diversity=_DiversityPolicy.disabled()
+            ),
+            model="m1",
+        )
+        # Without diversity, all 5 dupes show up.
+        assert len(items) == 5

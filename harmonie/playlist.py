@@ -1,13 +1,15 @@
 """Playlist generation: similar-seeded, chained, and vibe-based.
 
 All three generators read embeddings from the in-memory :class:`EmbeddingIndex`.
-The DB is consulted only for descriptor metadata and filter gating.
+The DB is consulted only for descriptor metadata, filter gating, and the
+artist/title tags that drive the diversity rules.
 """
 
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Literal
 
 import numpy as np
 
@@ -101,6 +103,108 @@ def compatible_keys_for(key: str | None, scale: str | None) -> set[tuple[str, st
 
 
 # ---------------------------------------------------------------------------
+# Diversity (per-artist cap + same-song deduplication)
+# ---------------------------------------------------------------------------
+
+# Verdicts returned by :meth:`_DiversityState.admit`. Strings rather than
+# an Enum so they're easy to grep, easy to read in stack traces, and
+# trivially serialisable if we ever want to expose them.
+_AdmitVerdict = Literal["ok", "duplicate", "over-cap"]
+
+
+@dataclass(frozen=True)
+class _DiversityPolicy:
+    """How aggressively a playlist mixes artists and dedupes duplicates.
+
+    ``max_per_artist=None`` disables the cap entirely (pure similarity
+    ranking, like the early versions of this module).
+
+    ``dedupe_titles=False`` lets the same ``(artist, title)`` tag pair
+    appear multiple times — useful when paths matter more than tags
+    (e.g. studio + live versions of the same song that happen to share
+    a title).
+
+    The defaults (cap=2, dedupe on) target the typical case: a personal
+    library where you don't want one artist dominating a 20-track
+    playlist and don't want the same song from three different
+    compilations.
+    """
+
+    max_per_artist: int | None = 2
+    dedupe_titles: bool = True
+
+    @classmethod
+    def disabled(cls) -> _DiversityPolicy:
+        """Pre-built policy with all rules off — equivalent to the
+        pre-diversity behaviour. Useful in tests and as an opt-out."""
+        return cls(max_per_artist=None, dedupe_titles=False)
+
+
+class _DiversityState:
+    """Mutable book-keeping for one playlist's diversity decisions.
+
+    Construct fresh per playlist; thread the same instance through the
+    full pick loop. The state separates from :class:`_DiversityPolicy`
+    so policies stay immutable and shareable.
+
+    Tracks are addressed by their ``(artist, title)`` tag pair, both
+    case-folded and stripped. Tracks with no artist tag are always
+    admissible — the cap can only count what's identifiable.
+    """
+
+    def __init__(self, policy: _DiversityPolicy) -> None:
+        self.policy = policy
+        self._artist_counts: dict[str, int] = {}
+        self._seen_titles: set[tuple[str, str]] = set()
+
+    @staticmethod
+    def _norm(s: str | None) -> str:
+        return (s or "").strip().lower()
+
+    def admit(self, artist: str | None, title: str | None) -> _AdmitVerdict:
+        """Classify a candidate without recording it.
+
+        Returns:
+            ``"ok"`` — admit; the caller should also call :meth:`record`.
+            ``"duplicate"`` — same ``(artist, title)`` already in the
+                playlist; reject permanently.
+            ``"over-cap"`` — artist's quota is full; reject in the
+                constrained pass, accept in the relaxation pass.
+        """
+        a = self._norm(artist)
+        t = self._norm(title)
+        if self.policy.dedupe_titles and a and t and (a, t) in self._seen_titles:
+            return "duplicate"
+        if (
+            self.policy.max_per_artist is not None
+            and a
+            and self._artist_counts.get(a, 0) >= self.policy.max_per_artist
+        ):
+            return "over-cap"
+        return "ok"
+
+    def record(self, artist: str | None, title: str | None) -> None:
+        """Mark a candidate as picked. Caller is responsible for calling
+        this exactly once per accepted track."""
+        a = self._norm(artist)
+        t = self._norm(title)
+        if a and t:
+            self._seen_titles.add((a, t))
+        if a:
+            self._artist_counts[a] = self._artist_counts.get(a, 0) + 1
+
+
+def _tags_lookup(
+    db: Database, model: str, policy: _DiversityPolicy
+) -> dict[int, tuple[str | None, str | None]]:
+    """Bulk-fetch ``{track_id: (artist, title)}`` for the playlist's model.
+    Skips the DB call entirely when the policy is fully disabled."""
+    if policy.max_per_artist is None and not policy.dedupe_titles:
+        return {}
+    return db.artist_title_by_id_for_model(model)
+
+
+# ---------------------------------------------------------------------------
 # Similar-seeded playlist
 # ---------------------------------------------------------------------------
 
@@ -113,6 +217,7 @@ class SimilarPlaylistRequest:
     harmonic_mix: bool = False
     descriptor_filter: TrackFilter | None = None
     include_seeds: bool = False
+    diversity: _DiversityPolicy = field(default_factory=_DiversityPolicy)
 
 
 def generate_similar_playlist(
@@ -173,6 +278,7 @@ def generate_similar_playlist(
         if req.bpm_drift is not None
         else {}
     )
+    tags_lookup = _tags_lookup(db, model, req.diversity)
 
     # Score every track against the centroid and oversample for the walk.
     centroid_n = l2_normalize_vec(centroid.astype(np.float32, copy=False))
@@ -196,36 +302,58 @@ def generate_similar_playlist(
     # Greedy nearest-neighbour walk for smooth transitions. Treat the
     # centroid (and one seed BPM) as the "previous" state for the first pick
     # so bpm_drift applies between the seed and the first selected track.
+    state = _DiversityState(req.diversity)
     chosen: list[tuple[int, str, float, np.ndarray]] = []
     prev_emb: np.ndarray = centroid_n
     prev_bpm: float | None = seed_bpms[0] if seed_bpms else None
 
-    while candidates and len(chosen) < req.n:
+    def _passes_smoothness(tid: int, bpm: float | None) -> bool:
+        if req.bpm_drift is None:
+            return True
+        if (
+            prev_bpm is not None
+            and bpm is not None
+            and abs(bpm - prev_bpm) > req.bpm_drift
+        ):
+            return False
+        return not (
+            seed_bpms
+            and bpm is not None
+            and min(abs(bpm - s) for s in seed_bpms) > req.bpm_drift * 2
+        )
+
+    def _best_pick(allow_over_cap: bool) -> int:
+        """Index into ``candidates`` of the best admissible pick, or -1."""
         best_idx = -1
         best_score = -2.0
         for i, (tid, _path, _seed_score, emb) in enumerate(candidates):
+            if not _passes_smoothness(tid, bpm_lookup.get(tid)):
+                continue
+            artist, title = tags_lookup.get(tid, (None, None))
+            verdict = state.admit(artist, title)
+            if verdict == "duplicate":
+                continue
+            if verdict == "over-cap" and not allow_over_cap:
+                continue
             sim = float(emb @ prev_emb)
-            if req.bpm_drift is not None:
-                bpm = bpm_lookup.get(tid)
-                if (
-                    prev_bpm is not None
-                    and bpm is not None
-                    and abs(bpm - prev_bpm) > req.bpm_drift
-                ):
-                    continue
-                if (
-                    seed_bpms
-                    and bpm is not None
-                    and min(abs(bpm - s) for s in seed_bpms) > req.bpm_drift * 2
-                ):
-                    continue
             if sim > best_score:
                 best_score = sim
                 best_idx = i
+        return best_idx
+
+    while candidates and len(chosen) < req.n:
+        # Constrained pass: respect both dedup and artist cap.
+        best_idx = _best_pick(allow_over_cap=False)
+        # Relaxation pass: cap dropped, dedup still applies. Lets the
+        # playlist reach `n` even when one artist dominates the pool.
+        if best_idx < 0:
+            best_idx = _best_pick(allow_over_cap=True)
         if best_idx < 0:
             break
         picked = candidates.pop(best_idx)
         chosen.append(picked)
+        artist, title = tags_lookup.get(picked[0], (None, None))
+        state.record(artist, title)
         prev_emb = picked[3]
         prev_bpm = bpm_lookup.get(picked[0])
 
@@ -266,6 +394,7 @@ class ChainedPlaylistRequest:
     include_seed: bool = False
     bpm_drift: float | None = None
     harmonic_mix: bool = False
+    diversity: _DiversityPolicy = field(default_factory=_DiversityPolicy)
 
 
 def generate_chained_playlist(
@@ -309,13 +438,20 @@ def generate_chained_playlist(
     # the per-pick consecutive-transition checks below.
     needs_meta = req.bpm_drift is not None or req.harmonic_mix
     track_meta = db.bpm_key_by_id_for_model(model) if needs_meta else {}
+    tags_lookup = _tags_lookup(db, model, req.diversity)
 
     visited: set[int] = set(req.seed_ids)
     chosen: list[Match] = []
+    state = _DiversityState(req.diversity)
     if req.include_seed:
         # Emit each seed in input order, with score 1.0 (perfect self-match).
+        # Seeds count toward the diversity budget — if you seed three Aphex
+        # Twin tracks with cap=2, the cap is already exceeded and the
+        # relaxation pass takes over for further picks.
         for sid, idx in zip(req.seed_ids, seed_indices):
             chosen.append(Match(track_id=sid, path=cached.paths[idx], score=1.0))
+            artist, title = tags_lookup.get(sid, (None, None))
+            state.record(artist, title)
 
     # L2-normalized centroid of the seed embeddings, used as the starting
     # anchor. Collapses to the single seed's vector when there's one seed.
@@ -329,11 +465,17 @@ def generate_chained_playlist(
     prev_key: str | None = first_seed.get("key")
     prev_scale: str | None = first_seed.get("scale")
 
-    while len(chosen) < req.n:
-        scores = cached.matrix @ anchor_emb  # cached rows are normalised
-        chunk: list[Match] = []
-        # Within a chunk, prev_* updates as we pick — so consecutive picks
-        # are checked against each other, not just against the chunk anchor.
+    def _scan_chunk(allow_over_cap: bool) -> list[tuple[Match, dict]]:
+        """One pass over the sorted candidate list, picking up to
+        ``chunk_size`` admissible tracks. Returns ``[(match, meta)]``
+        where ``meta`` carries the bpm/key/scale we need to advance the
+        consecutive-transition baseline.
+
+        Smoothness checks update *within* the scan (consecutive picks
+        check against each other). Diversity checks consult the shared
+        outer state so artist counts persist across chunks.
+        """
+        chunk: list[tuple[Match, dict]] = []
         chunk_prev_bpm = prev_bpm
         chunk_prev_key = prev_key
         chunk_prev_scale = prev_scale
@@ -343,6 +485,8 @@ def generate_chained_playlist(
             if tid in visited:
                 continue
             if allowed_ids is not None and tid not in allowed_ids:
+                continue
+            if any(m.track_id == tid for m, _ in chunk):
                 continue
 
             cand_bpm = cand_key = cand_scale = None
@@ -371,27 +515,59 @@ def generate_chained_playlist(
             ):
                 continue
 
+            artist, title = tags_lookup.get(tid, (None, None))
+            verdict = state.admit(artist, title)
+            if verdict == "duplicate":
+                continue
+            if verdict == "over-cap" and not allow_over_cap:
+                continue
+
             chunk.append(
-                Match(
-                    track_id=tid,
-                    path=cached.paths[idx],
-                    score=float(scores[idx]),
+                (
+                    Match(
+                        track_id=tid,
+                        path=cached.paths[idx],
+                        score=float(scores[idx]),
+                    ),
+                    {
+                        "bpm": cand_bpm,
+                        "key": cand_key,
+                        "scale": cand_scale,
+                        "artist": artist,
+                        "title": title,
+                    },
                 )
             )
+            # Record into the shared diversity state immediately so a
+            # second duplicate in the same chunk gets caught by admit().
+            # Without this, the cap and dedup only fire across chunks,
+            # not within them.
+            state.record(artist, title)
             chunk_prev_bpm = cand_bpm if cand_bpm is not None else chunk_prev_bpm
             chunk_prev_key = cand_key if cand_key else chunk_prev_key
             chunk_prev_scale = cand_scale if cand_scale else chunk_prev_scale
 
             if len(chunk) >= req.chunk_size:
                 break
+        return chunk
+
+    while len(chosen) < req.n:
+        scores = cached.matrix @ anchor_emb  # cached rows are normalised
+        # Constrained pass first; relax cap if the chunk would otherwise
+        # be empty (no progress = playlist truncates short of n).
+        chunk = _scan_chunk(allow_over_cap=False)
         if not chunk:
-            break  # ran out of candidates that satisfy the constraints
+            chunk = _scan_chunk(allow_over_cap=True)
+        if not chunk:
+            break  # no admissible candidates anywhere
 
         # Don't overshoot the requested length.
         chunk = chunk[: req.n - len(chosen)]
-        for m in chunk:
-            chosen.append(m)
-            visited.add(m.track_id)
+        for match, _meta in chunk:
+            chosen.append(match)
+            visited.add(match.track_id)
+            # State was already recorded inline during the scan so
+            # within-chunk admission decisions stay consistent.
 
         # Re-anchor on the last track and update the running prev_* state.
         last_id = chosen[-1].track_id
@@ -423,6 +599,7 @@ class VibePlaylistRequest:
     target_danceability: float | None = None
     shuffle: bool = True
     seed: int | None = None
+    diversity: _DiversityPolicy = field(default_factory=_DiversityPolicy)
 
 
 def generate_vibe_playlist(
@@ -454,7 +631,35 @@ def generate_vibe_playlist(
     if req.shuffle:
         random.Random(req.seed).shuffle(pool)
 
+    # Apply diversity in order. ``deferred`` stores over-cap rows for the
+    # relaxation pass; duplicates are skipped permanently.
+    state = _DiversityState(req.diversity)
+    chosen: list[dict] = []
+    deferred: list[dict] = []
+    for row in pool:
+        if len(chosen) >= req.n:
+            break
+        verdict = state.admit(row.get("artist"), row.get("title"))
+        if verdict == "duplicate":
+            continue
+        if verdict == "over-cap":
+            deferred.append(row)
+            continue
+        chosen.append(row)
+        state.record(row.get("artist"), row.get("title"))
+
+    if len(chosen) < req.n:
+        for row in deferred:
+            if len(chosen) >= req.n:
+                break
+            # Cap is dropped here; dedup may still bite if the same title
+            # is now in chosen via the constrained pass.
+            if state.admit(row.get("artist"), row.get("title")) == "duplicate":
+                continue
+            chosen.append(row)
+            state.record(row.get("artist"), row.get("title"))
+
     return [
         Match(track_id=int(r["id"]), path=r["path"], score=float(fitness(r)))
-        for r in pool[: req.n]
+        for r in chosen
     ]

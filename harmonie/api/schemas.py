@@ -212,6 +212,26 @@ class _PlaylistCommon(BaseModel):
         None,
         description="Hard constraints on the candidate pool.",
     )
+    max_per_artist: int | None = Field(
+        2,
+        ge=1,
+        description=(
+            "Cap on tracks from any single artist. The cap relaxes "
+            "automatically when the candidate pool can't satisfy it (better "
+            "to ship a longer playlist with some repetition than a short "
+            "one). Set to ``null`` to disable. Tracks with no artist tag "
+            "are always admitted."
+        ),
+    )
+    dedupe_titles: bool = Field(
+        True,
+        description=(
+            "Skip tracks whose ``(artist, title)`` tag pair already "
+            "appeared earlier in the playlist. Lets the same song on "
+            "multiple albums or compilations show up only once. Comparison "
+            "is case-insensitive and whitespace-trimmed."
+        ),
+    )
 
 
 class _SeededPlaylist(_PlaylistCommon):
