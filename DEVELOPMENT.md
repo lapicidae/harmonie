@@ -161,28 +161,33 @@ Existing migration files don't change after they've shipped; new changes are new
 
 ## Releases
 
-Versions come from git tags via setuptools-scm. A push to `main` automatically creates a new patch tag (`v1.0.1`, `v1.0.2`, ...) and a corresponding GitHub release with auto-generated notes. The workflow lives in `.github/workflows/release.yml`.
+Versions come from git tags via setuptools-scm. A push to `main` automatically creates a new tag and a corresponding GitHub release with auto-generated notes. The workflow lives in `.github/workflows/release.yml`.
 
-The auto-bump only ever steps the patch component. For minor or major bumps, tag the desired commit yourself before pushing:
+By default the patch component bumps. Override with a marker anywhere in the commit message:
 
-```bash
-# After merging a feature:
-git tag v1.1.0
-git push origin v1.1.0
+| Marker | Effect | Example |
+|---|---|---|
+| _(none)_ | patch bump | `v1.0.5` → `v1.0.6` |
+| `[bump minor]` | minor bump, patch resets to 0 | `v1.0.6` → `v1.1.0` |
+| `[bump major]` | major bump, minor and patch reset to 0 | `v1.1.0` → `v2.0.0` |
+| `[skip release]` (or `[skip ci]`) | no tag created | for typo fixes / CI tweaks |
 
-# After a breaking change:
-git tag v2.0.0
-git push origin v2.0.0
-```
-
-The next push to `main` after that resumes patch-bumping from your tag (`v1.1.0` → `v1.1.1`, etc.).
-
-To skip versioning for a single commit (typo fixes, CI tweaks, doc-only changes), include `[skip release]` in the commit message:
+The marker can sit in the subject or body. For PR merges via the GitHub UI, put the marker in the squash/merge commit message.
 
 ```bash
-git commit -m "docs: fix typo [skip release]"
-```
+# Patch (the common case): nothing special.
+git commit -m "fix: handle empty libraries list"
 
-`[skip ci]` works as a synonym.
+# Minor:
+git commit -m "feat: add /api/v2/playlists [bump minor]"
+
+# Major:
+git commit -m "refactor!: drop legacy /scan endpoint [bump major]"
+
+# Skip:
+git commit -m "ci: tweak workflow [skip release]"
+```
 
 `pipx upgrade harmonie` always picks up the highest version tag, so users see the new release the moment the tag is pushed.
+
+If the workflow ever gets out of sync (e.g. you tag manually), it just resumes from whatever the highest `v*.*.*` tag is on the next push.

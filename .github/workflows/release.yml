@@ -1,10 +1,16 @@
 name: release
 
-# Auto-tag every push to main with the next patch version. Major and
-# minor bumps are still manual: tag v1.1.0 (or v2.0.0) yourself and the
-# workflow will resume patch-bumping from there. Add ``[skip release]``
-# to a commit message to suppress tagging for that commit (typo fixes,
-# CI tweaks, etc.).
+# Auto-tag every push to main with the next version.
+#
+# Default bump is the patch component. Override with a marker in the
+# commit message:
+#
+#   [bump minor]   -> 1.0.5 → 1.1.0
+#   [bump major]   -> 1.1.0 → 2.0.0
+#   [skip release] -> no tag created (alias: [skip ci])
+#
+# Markers can appear anywhere in the commit message (subject or body).
+# For PR merges, put the marker in the squash/merge commit message.
 
 on:
   push:
@@ -29,32 +35,46 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Check skip marker
-        id: should_skip
+      - name: Decide bump
+        id: decide
         run: |
           msg=$(git log -1 --pretty=%B)
           if echo "$msg" | grep -qE '\[skip release\]|\[skip ci\]'; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "Skipping release per commit message marker."
+          elif echo "$msg" | grep -qE '\[bump major\]'; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "level=major" >> "$GITHUB_OUTPUT"
+          elif echo "$msg" | grep -qE '\[bump minor\]'; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "level=minor" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "level=patch" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Compute next patch version
-        if: steps.should_skip.outputs.skip == 'false'
+      - name: Compute next version
+        if: steps.decide.outputs.skip == 'false'
         id: bump
+        env:
+          LEVEL: ${{ steps.decide.outputs.level }}
         run: |
           set -euo pipefail
           latest=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
           latest=${latest:-v0.0.0}
           IFS='.' read -r major minor patch <<< "${latest#v}"
-          patch=$((patch + 1))
+          case "$LEVEL" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+            *) echo "unknown bump level: $LEVEL" >&2; exit 1 ;;
+          esac
           new="v${major}.${minor}.${patch}"
           echo "new=$new" >> "$GITHUB_OUTPUT"
-          echo "Bumping ${latest} -> ${new}"
+          echo "Bumping ${latest} -> ${new} (level=${LEVEL})"
 
       - name: Push tag
-        if: steps.should_skip.outputs.skip == 'false'
+        if: steps.decide.outputs.skip == 'false'
         env:
           NEW_TAG: ${{ steps.bump.outputs.new }}
         run: |
@@ -64,7 +84,7 @@ jobs:
           git push origin "$NEW_TAG"
 
       - name: Create GitHub release
-        if: steps.should_skip.outputs.skip == 'false'
+        if: steps.decide.outputs.skip == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.bump.outputs.new }}
