@@ -666,6 +666,96 @@ class TestSimilarPlaylistDiversity:
         assert len(xtals) == 1
 
 
+class TestSeedDedup:
+    """Regression: when the seed has the same (artist, title) as another file
+    in the library, that other file must not be picked first. The seed's
+    tags need to anchor the dedup state even when the seed itself is
+    excluded from the output."""
+
+    def test_similar_excludes_alternate_file_of_seed_song(
+        self, make_db, fake_descriptors
+    ):
+        db, index = make_db()
+        rng = np.random.default_rng(20)
+        seed_emb = rng.standard_normal(8).astype(np.float32)
+        # Seed is "Oliver Schories - Bengalo".
+        seed = _add(
+            db,
+            "/album/01-bengalo.flac",
+            seed_emb,
+            fake_descriptors(),
+            artist="Oliver Schories",
+            title="Bengalo",
+        )
+        # An alternate file of the very same song — different path, same tags.
+        # Embedding only differs by tiny noise so it's the highest-similarity
+        # non-seed candidate.
+        alt = _add(
+            db,
+            "/compilation/05-bengalo.flac",
+            seed_emb + 0.001 * rng.standard_normal(8).astype(np.float32),
+            fake_descriptors(),
+            artist="Oliver Schories",
+            title="Bengalo",
+        )
+        # Filler so the playlist can fill without relaxing dedup (it never does).
+        for i in range(8):
+            _add(
+                db,
+                f"/filler/{i}.flac",
+                seed_emb + 0.2 * rng.standard_normal(8).astype(np.float32),
+                fake_descriptors(),
+                artist=f"Artist{i}",
+                title=f"Song{i}",
+            )
+
+        items = generate_similar_playlist(
+            db, index, SimilarPlaylistRequest(seed_ids=[seed], n=5)
+        )
+        assert alt not in [m.track_id for m in items]
+
+    def test_chained_excludes_alternate_file_of_seed_song(
+        self, make_db, fake_descriptors
+    ):
+        from harmonie.playlist import ChainedPlaylistRequest, generate_chained_playlist
+
+        db, index = make_db()
+        rng = np.random.default_rng(21)
+        seed_emb = rng.standard_normal(8).astype(np.float32)
+        seed = _add(
+            db,
+            "/album/01-bengalo.flac",
+            seed_emb,
+            fake_descriptors(),
+            artist="Oliver Schories",
+            title="Bengalo",
+        )
+        alt = _add(
+            db,
+            "/compilation/05-bengalo.flac",
+            seed_emb + 0.001 * rng.standard_normal(8).astype(np.float32),
+            fake_descriptors(),
+            artist="Oliver Schories",
+            title="Bengalo",
+        )
+        for i in range(8):
+            _add(
+                db,
+                f"/filler/{i}.flac",
+                seed_emb + 0.2 * rng.standard_normal(8).astype(np.float32),
+                fake_descriptors(),
+                artist=f"Artist{i}",
+                title=f"Song{i}",
+            )
+
+        items = generate_chained_playlist(
+            db,
+            index,
+            ChainedPlaylistRequest(seed_ids=[seed], chunk_size=3, n=5),
+        )
+        assert alt not in [m.track_id for m in items]
+
+
 class TestChainedPlaylistDiversity:
     def test_artist_cap_respected_across_chunks(self, make_db, fake_descriptors):
         from harmonie.playlist import ChainedPlaylistRequest, generate_chained_playlist

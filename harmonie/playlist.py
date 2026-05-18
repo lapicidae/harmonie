@@ -303,6 +303,13 @@ def generate_similar_playlist(
     # centroid (and one seed BPM) as the "previous" state for the first pick
     # so bpm_drift applies between the seed and the first selected track.
     state = _DiversityState(req.diversity)
+    # When seeds are excluded from the output, their (artist, title) tags
+    # must still count toward dedup — otherwise a different file of the
+    # same song slips in as the first pick. When seeds are included, the
+    # natural picking flow records them as they're picked.
+    if not req.include_seeds:
+        for r in seed_rows:
+            state.record(r.get("artist"), r.get("title"))
     chosen: list[tuple[int, str, float, np.ndarray]] = []
     prev_emb: np.ndarray = centroid_n
     prev_bpm: float | None = seed_bpms[0] if seed_bpms else None
@@ -450,6 +457,13 @@ def generate_chained_playlist(
         # relaxation pass takes over for further picks.
         for sid, idx in zip(req.seed_ids, seed_indices):
             chosen.append(Match(track_id=sid, path=cached.paths[idx], score=1.0))
+            artist, title = tags_lookup.get(sid, (None, None))
+            state.record(artist, title)
+    else:
+        # Seeds don't appear in the output but their (artist, title) tags
+        # still anchor dedup. Otherwise a different file of the same song
+        # gets picked first.
+        for sid in req.seed_ids:
             artist, title = tags_lookup.get(sid, (None, None))
             state.record(artist, title)
 
