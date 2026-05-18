@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from contextlib import asynccontextmanager, suppress
@@ -22,6 +23,36 @@ access_logger = logging.getLogger("harmonie.api.requests")
 # constantly.
 _QUIET_PATHS = frozenset({"/health"})
 
+# Methods whose body is worth logging at DEBUG. GET/HEAD/OPTIONS/DELETE
+# may technically carry bodies but rarely do in practice.
+_BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
+
+# Cap how much of the body lands in the log line. Keeps a paste-bombed
+# request from filling the journal.
+_BODY_LOG_LIMIT_BYTES = 8 * 1024
+
+
+def _format_body(body: bytes) -> str:
+    """Best-effort, single-line debug rendering of a request body.
+
+    Truncates to :data:`_BODY_LOG_LIMIT_BYTES`. JSON bodies are
+    re-serialised compactly so they fit on one log line; non-UTF-8
+    bodies show up as ``<N bytes binary>``.
+    """
+    if not body:
+        return "(empty)"
+    truncated = len(body) > _BODY_LOG_LIMIT_BYTES
+    payload = body[:_BODY_LOG_LIMIT_BYTES]
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return f"<{len(body)} bytes binary>"
+    with suppress(json.JSONDecodeError):
+        text = json.dumps(json.loads(text), separators=(",", ":"), ensure_ascii=False)
+    if truncated:
+        return f"{text}... (truncated, {len(body)} total bytes)"
+    return text
+
 
 async def _log_requests(request: Request, call_next):
     """Log one line per HTTP request through the ``harmonie.api.requests``
@@ -29,10 +60,29 @@ async def _log_requests(request: Request, call_next):
 
     Format: ``<client> <method> <path>[?<query>] -> <status> (<ms>ms)``.
     Logs even when the handler raises, with ``status=500`` as the
-    fallback.
+    fallback. For POST/PUT/PATCH at DEBUG level, the request body is
+    logged on a follow-up line (``<- body: ...``); the body is otherwise
+    not read so there's no overhead at higher log levels.
     """
     start = time.monotonic()
     status: int = 500
+
+    # Read the body up front only when we'd actually log it. Reading
+    # consumes the ASGI receive stream, so we patch request._receive to
+    # replay the bytes for the downstream handler.
+    body_for_log: bytes | None = None
+    if (
+        request.method in _BODY_METHODS
+        and request.url.path not in _QUIET_PATHS
+        and access_logger.isEnabledFor(logging.DEBUG)
+    ):
+        body_for_log = await request.body()
+
+        async def _replay_receive():
+            return {"type": "http.request", "body": body_for_log, "more_body": False}
+
+        request._receive = _replay_receive  # type: ignore[attr-defined]
+
     try:
         response = await call_next(request)
         status = response.status_code
@@ -53,6 +103,8 @@ async def _log_requests(request: Request, call_next):
             status,
             duration_ms,
         )
+        if body_for_log is not None:
+            access_logger.debug("  <- body: %s", _format_body(body_for_log))
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

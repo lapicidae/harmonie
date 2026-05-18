@@ -12,11 +12,12 @@ Covers:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from harmonie.api.filters import FilterBody, FloatRange, build_track_filter, parse_range
@@ -653,6 +654,12 @@ def logged_app():
     def _boom():
         raise RuntimeError("kaboom")
 
+    @app.post("/echo")
+    async def _echo(request: Request):
+        # Read the body to prove the middleware doesn't break re-reading.
+        body = await request.body()
+        return {"received": body.decode("utf-8") if body else ""}
+
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -684,3 +691,51 @@ class TestRequestLogging:
         records = [rec for rec in caplog.records if rec.name == "harmonie.api.requests"]
         assert len(records) == 1
         assert "500" in records[0].getMessage()
+
+    def test_post_body_logged_at_debug(self, logged_app, caplog):
+        """POST bodies appear on a follow-up DEBUG line."""
+        with caplog.at_level("DEBUG", logger="harmonie.api.requests"):
+            r = logged_app.post("/echo", json={"hello": "world", "n": 7})
+        assert r.status_code == 200
+        # The downstream handler must still see the body intact.
+        assert json.loads(r.json()["received"]) == {"hello": "world", "n": 7}
+        records = [rec for rec in caplog.records if rec.name == "harmonie.api.requests"]
+        # Two records: the access line, then the body line.
+        assert len(records) == 2
+        body_line = records[1]
+        assert body_line.levelname == "DEBUG"
+        msg = body_line.getMessage()
+        assert "<- body:" in msg
+        assert '"hello":"world"' in msg  # JSON re-serialised compactly
+        assert '"n":7' in msg
+
+    def test_post_body_not_read_at_info(self, logged_app, caplog):
+        """At INFO level the body isn't read or logged at all."""
+        with caplog.at_level("INFO", logger="harmonie.api.requests"):
+            r = logged_app.post("/echo", json={"secret": "value"})
+        assert r.status_code == 200
+        records = [rec for rec in caplog.records if rec.name == "harmonie.api.requests"]
+        # Only the access line; no body record.
+        assert len(records) == 1
+        assert "secret" not in records[0].getMessage()
+
+    def test_post_body_truncated_when_huge(self, logged_app, caplog):
+        """Bodies larger than the limit get truncated rather than logged in full."""
+        big = "x" * (16 * 1024)  # 16 KB, well above the 8 KB cap
+        with caplog.at_level("DEBUG", logger="harmonie.api.requests"):
+            r = logged_app.post("/echo", content=big)
+        assert r.status_code == 200
+        records = [rec for rec in caplog.records if rec.name == "harmonie.api.requests"]
+        body_line = records[1]
+        msg = body_line.getMessage()
+        assert "truncated" in msg
+        assert f"{len(big)} total bytes" in msg
+
+    def test_get_request_body_not_logged(self, logged_app, caplog):
+        """GET requests don't trigger body logging even at DEBUG."""
+        with caplog.at_level("DEBUG", logger="harmonie.api.requests"):
+            logged_app.get("/probe")
+        records = [rec for rec in caplog.records if rec.name == "harmonie.api.requests"]
+        # Only the access line; GETs never get a body record.
+        assert len(records) == 1
+        assert "<- body" not in records[0].getMessage()
