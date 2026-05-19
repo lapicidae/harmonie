@@ -134,6 +134,21 @@ These apply to every mode:
 
 The seeds anchor the playlist; results stay close to their embedding centroid. This is the "Track Radio" surface.
 
+```mermaid
+flowchart TD
+    A[Resolve seed IDs] --> B[anchor = mean of seed embeddings]
+    B --> C[Score every track:<br/>cosine similarity to anchor]
+    C --> D[Take top oversample as candidate pool]
+    D --> E{got n picks?}
+    E -- yes --> Z([Return playlist])
+    E -- no --> F["For each candidate:<br/>effective = sim(candidate, anchor) − cooldown_penalty(artist)"]
+    F --> G[Filter out dedup duplicates<br/>and BPM-drift / harmonic violations]
+    G --> H[Pick max effective score]
+    H --> I[Record artist & title<br/>into diversity state]
+    I --> J[anchor = picked.embedding]
+    J --> E
+```
+
 ```bash
 # Minimum: 20 tracks similar to track 42.
 curl -X POST http://localhost:8842/api/v1/playlists \
@@ -170,6 +185,18 @@ curl -X POST http://localhost:8842/api/v1/playlists \
 
 `drift` walks gradually away from the seeds' embedding centroid. Each chunk of `chunk_size` tracks is anchored on the last pick, so the playlist evolves in style as it goes. One seed or several — both work; with multiple seeds, the centroid is the starting anchor.
 
+```mermaid
+flowchart TD
+    A[Resolve seed IDs] --> B[anchor = mean of seed embeddings]
+    B --> C{got n picks?}
+    C -- yes --> Z([Return playlist])
+    C -- no --> D[Score every track:<br/>cosine similarity to anchor]
+    D --> E[Pick up to chunk_size tracks,<br/>each maximising effective score<br/>under dedup, BPM and harmonic gates]
+    E --> F[Record each pick<br/>into diversity state]
+    F --> G[anchor = last pick's embedding]
+    G --> C
+```
+
 ```bash
 curl -X POST http://localhost:8842/api/v1/playlists \
   -H 'content-type: application/json' \
@@ -194,6 +221,21 @@ Scores typically jump at chunk boundaries because the first track of each chunk 
 #### Mode `vibe`: descriptor-driven
 
 No seeds. The `filter` block narrows the candidate pool; the `target` block ranks within it by closeness.
+
+```mermaid
+flowchart TD
+    A[Apply filter:<br/>BPM range, styles, etc.] --> B[Score each row by<br/>closeness to target fields<br/>= fitness]
+    B --> C{shuffle requested?}
+    C -- yes --> D[Random shuffle pool]
+    C -- no --> E[Order by fitness desc]
+    D --> F{got n picks?}
+    E --> F
+    F -- yes --> Z([Return playlist])
+    F -- no --> G["For each row:<br/>effective = fitness − cooldown_penalty(artist)"]
+    G --> H[Pick max effective<br/>skipping (artist, title) duplicates]
+    H --> I[Record artist & title<br/>into diversity state]
+    I --> F
+```
 
 ```bash
 curl -X POST http://localhost:8842/api/v1/playlists \
