@@ -1,0 +1,53 @@
+{
+  "items": [
+    {
+      "artist": "Autechre",
+      "score": 0.9336,
+      "title": "Cipater",
+      "track_id": 11
+    },
+    {
+      "artist": "Boards of Canada",
+      "score": 0.8364,
+      "title": "Aquarius",
+      "track_id": 7
+    },
+    {
+      "artist": "Burial",
+      "score": 0.8975,
+      "title": "Archangel",
+      "track_id": 8
+    },
+    {
+      "artist": "Plastikman",
+      "score": 0.9258,
+      "title": "Spastik",
+      "track_id": 12
+    },
+    {
+      "artist": "Aphex Twin",
+      "score": 0.8647,
+      "title": "Tha",
+      "track_id": 2
+    },
+    {
+      "artist": "Boards of Canada",
+      "score": 0.7167,
+      "title": "Olson",
+      "track_id": 6
+    },
+    {
+      "artist": "Autechre",
+      "score": 0.7731,
+      "title": "Acroyear2",
+      "track_id": 10
+    },
+    {
+      "artist": "Aphex Twin",
+      "score": 0.7162,
+      "title": "Heliosphan",
+      "track_id": 3
+    }
+  ],
+  "request": "similar / Aphex Twin \u2013 Xtal / n=8"
+}

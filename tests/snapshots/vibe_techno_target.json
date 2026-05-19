@@ -1,0 +1,41 @@
+{
+  "items": [
+    {
+      "artist": "Aphex Twin",
+      "score": -0.2,
+      "title": "Xtal",
+      "track_id": 1
+    },
+    {
+      "artist": "Autechre",
+      "score": -0.6,
+      "title": "Cipater",
+      "track_id": 11
+    },
+    {
+      "artist": "Aphex Twin",
+      "score": -0.6,
+      "title": "Heliosphan",
+      "track_id": 3
+    },
+    {
+      "artist": "Plastikman",
+      "score": -0.8,
+      "title": "Spastik",
+      "track_id": 12
+    },
+    {
+      "artist": "Autechre",
+      "score": -0.8,
+      "title": "Acroyear2",
+      "track_id": 10
+    },
+    {
+      "artist": "Aphex Twin",
+      "score": -0.8,
+      "title": "Tha",
+      "track_id": 2
+    }
+  ],
+  "request": "vibe / bpm 120-140 / target 128bpm dance 1.5"
+}

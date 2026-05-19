@@ -1,0 +1,41 @@
+{
+  "items": [
+    {
+      "artist": "Plastikman",
+      "score": 0.9258,
+      "title": "Spastik",
+      "track_id": 12
+    },
+    {
+      "artist": "Boards of Canada",
+      "score": 0.8447,
+      "title": "Roygbiv",
+      "track_id": 5
+    },
+    {
+      "artist": "Autechre",
+      "score": 0.7731,
+      "title": "Acroyear2",
+      "track_id": 10
+    },
+    {
+      "artist": "Radiohead",
+      "score": 0.0826,
+      "title": "Karma Police",
+      "track_id": 22
+    },
+    {
+      "artist": "Pink Floyd",
+      "score": 0.1652,
+      "title": "Echoes",
+      "track_id": 25
+    },
+    {
+      "artist": "Led Zeppelin",
+      "score": 0.0402,
+      "title": "Kashmir",
+      "track_id": 26
+    }
+  ],
+  "request": "similar / Aphex Twin \u2013 Xtal / n=6 / harmonic_mix=True"
+}

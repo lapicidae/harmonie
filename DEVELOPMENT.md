@@ -96,6 +96,17 @@ pytest
 
 The non-Essentia parts (DB, similarity, playlist, scan, tags, API) are covered by the `tests/` suite. Essentia itself is exercised by running an actual scan against a small fixture library.
 
+### Snapshot tests for playlists
+
+`tests/test_snapshots.py` runs each playlist mode against a deterministic fixture DB built by `tests/fixtures/snapshot_db.py` (33 tracks across four genre neighbourhoods). The expected output of each request is committed under `tests/snapshots/*.json`. A regression in the picker, diversity logic, or scoring shows up as a snapshot mismatch.
+
+When a change to the algorithm is intentional, regenerate the snapshots and review the diff:
+
+```bash
+SNAPSHOT_UPDATE=1 pytest tests/test_snapshots.py
+git diff tests/snapshots/
+```
+
 ## Scan history
 
 Every scan run is persisted to two tables (added in migration 002):

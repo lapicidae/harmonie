@@ -1,0 +1,41 @@
+{
+  "items": [
+    {
+      "artist": "Brian Eno",
+      "score": 0.0,
+      "title": "1/1",
+      "track_id": 13
+    },
+    {
+      "artist": "Brian Eno",
+      "score": -0.4,
+      "title": "Discreet Music",
+      "track_id": 15
+    },
+    {
+      "artist": "Stars of the Lid",
+      "score": -1.0,
+      "title": "Articulate Silences",
+      "track_id": 17
+    },
+    {
+      "artist": "Tim Hecker",
+      "score": -1.0,
+      "title": "In the Air",
+      "track_id": 18
+    },
+    {
+      "artist": "Radiohead",
+      "score": -1.0,
+      "title": "Karma Police",
+      "track_id": 22
+    },
+    {
+      "artist": "Brian Eno",
+      "score": -1.0,
+      "title": "2/1",
+      "track_id": 14
+    }
+  ],
+  "request": "vibe / bpm <=85 / target 70bpm"
+}
