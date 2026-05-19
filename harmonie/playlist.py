@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Callable, Literal, TypeVar
 
 import numpy as np
 
@@ -250,6 +250,44 @@ def _tags_lookup(
     return db.artist_title_by_id_for_model(model)
 
 
+_T = TypeVar("_T")
+
+
+def _argmax_admissible(
+    candidates: list[_T],
+    state: _DiversityState,
+    *,
+    score_fn: Callable[[_T], float],
+    artist_title_fn: Callable[[_T], tuple[str | None, str | None]],
+    filter_fn: Callable[[_T], bool] | None = None,
+) -> int:
+    """Index of the candidate with the highest effective score.
+
+    Effective score = ``score_fn(c) - state.cooldown_penalty(artist)``.
+    Tracks rejected by ``state.admit`` (duplicates) or by the optional
+    ``filter_fn`` are skipped. Returns ``-1`` when nothing qualifies.
+
+    This is the one place playlists encode "diversity rerank": each
+    generator supplies its own per-pick scoring and pre-filtering, but
+    the dedup and cooldown logic stay here. Adding a new diversity
+    dimension means extending :class:`_DiversityState` and this
+    function — the three generators don't need to change.
+    """
+    best_idx = -1
+    best_score = -math.inf
+    for i, cand in enumerate(candidates):
+        if filter_fn is not None and not filter_fn(cand):
+            continue
+        artist, title = artist_title_fn(cand)
+        if state.admit(artist, title) == "duplicate":
+            continue
+        eff = score_fn(cand) - state.cooldown_penalty(artist)
+        if eff > best_score:
+            best_score = eff
+            best_idx = i
+    return best_idx
+
+
 # ---------------------------------------------------------------------------
 # Similar-seeded playlist
 # ---------------------------------------------------------------------------
@@ -375,27 +413,14 @@ def generate_similar_playlist(
             and min(abs(bpm - s) for s in seed_bpms) > req.bpm_drift * 2
         )
 
-    def _best_pick() -> int:
-        """Index into ``candidates`` of the candidate with the highest
-        effective similarity (raw similarity minus cooldown penalty),
-        or -1 if nothing's admissible. Dedup is the only hard filter;
-        the cooldown is folded into the score."""
-        best_idx = -1
-        best_score = -2.0
-        for i, (tid, _path, _seed_score, emb) in enumerate(candidates):
-            if not _passes_smoothness(tid, bpm_lookup.get(tid)):
-                continue
-            artist, title = tags_lookup.get(tid, (None, None))
-            if state.admit(artist, title) == "duplicate":
-                continue
-            sim = float(emb @ prev_emb) - state.cooldown_penalty(artist)
-            if sim > best_score:
-                best_score = sim
-                best_idx = i
-        return best_idx
-
     while candidates and len(chosen) < req.n:
-        best_idx = _best_pick()
+        best_idx = _argmax_admissible(
+            candidates,
+            state,
+            score_fn=lambda c, _p=prev_emb: float(c[3] @ _p),
+            artist_title_fn=lambda c: tags_lookup.get(c[0], (None, None)),
+            filter_fn=lambda c: _passes_smoothness(c[0], bpm_lookup.get(c[0])),
+        )
         if best_idx < 0:
             break
         picked = candidates.pop(best_idx)
@@ -520,93 +545,75 @@ def generate_chained_playlist(
     prev_key: str | None = first_seed.get("key")
     prev_scale: str | None = first_seed.get("scale")
 
-    def _find_one_pick(
+    def _smoothness_ok(
+        cand_bpm: float | None,
+        cand_key: str | None,
+        cand_scale: str | None,
         chunk_prev_bpm: float | None,
         chunk_prev_key: str | None,
         chunk_prev_scale: str | None,
-        in_chunk_ids: set[int],
-    ) -> tuple[int, int, str | None, str | None] | None:
-        """Find the candidate with the highest effective score (raw
-        similarity to the anchor minus cooldown penalty for its
-        artist), subject to dedup, smoothness, and the allowed-id gate.
-        Returns ``(idx_in_cached, track_id, artist, title)`` or
-        ``None`` if nothing qualifies."""
-        best_idx = -1
-        best_score = -math.inf
-        best_meta: tuple[str | None, str | None] = (None, None)
-        for idx in np.argsort(-scores):
-            tid = cached.ids[idx]
-            if tid in visited or tid in in_chunk_ids:
-                continue
-            if allowed_ids is not None and tid not in allowed_ids:
-                continue
-
-            cand_bpm = cand_key = cand_scale = None
-            if needs_meta:
-                meta = track_meta.get(tid)
-                if meta is not None:
-                    cand_bpm, cand_key, cand_scale = meta
-
-            # Harmonic-mix: candidate's key must be Camelot-compatible
-            # with the previous pick. Strict — tracks without key info
-            # are excluded when this constraint is on.
-            if req.harmonic_mix:
-                if not cand_key or not cand_scale:
-                    continue
-                if chunk_prev_key and chunk_prev_scale:
-                    ok_pairs = compatible_keys_for(chunk_prev_key, chunk_prev_scale)
-                    if (cand_key, cand_scale) not in ok_pairs:
-                        continue
-
-            # bpm_drift: candidate's BPM within tolerance of previous pick.
-            # Lenient — skip the check if either side has no BPM info.
-            if req.bpm_drift is not None and (
-                chunk_prev_bpm is not None
-                and cand_bpm is not None
-                and abs(cand_bpm - chunk_prev_bpm) > req.bpm_drift
-            ):
-                continue
-
-            artist, title = tags_lookup.get(tid, (None, None))
-            if state.admit(artist, title) == "duplicate":
-                continue
-
-            effective = float(scores[idx]) - state.cooldown_penalty(artist)
-            if effective > best_score:
-                best_score = effective
-                best_idx = int(idx)
-                best_meta = (artist, title)
-        if best_idx < 0:
-            return None
-        tid = cached.ids[best_idx]
-        return (best_idx, tid, best_meta[0], best_meta[1])
+    ) -> bool:
+        """Harmonic-mix and bpm_drift checks against the running
+        chunk-local baseline."""
+        if req.harmonic_mix:
+            if not cand_key or not cand_scale:
+                return False
+            if chunk_prev_key and chunk_prev_scale:
+                ok_pairs = compatible_keys_for(chunk_prev_key, chunk_prev_scale)
+                if (cand_key, cand_scale) not in ok_pairs:
+                    return False
+        return not (
+            req.bpm_drift is not None
+            and chunk_prev_bpm is not None
+            and cand_bpm is not None
+            and abs(cand_bpm - chunk_prev_bpm) > req.bpm_drift
+        )
 
     def _scan_chunk() -> list[tuple[Match, dict]]:
-        """Pick up to ``chunk_size`` tracks. Each pick maximises the
-        effective score (similarity − cooldown penalty) so a recent
-        artist's similarity needs to overshoot the alternatives by the
-        decaying penalty in order to be picked again."""
+        """Pick up to ``chunk_size`` tracks for one re-anchoring window.
+        Diversity is handled by ``_argmax_admissible``; this loop only
+        deals with chunk-local smoothness state and the visited set."""
         chunk: list[tuple[Match, dict]] = []
         chunk_prev_bpm = prev_bpm
         chunk_prev_key = prev_key
         chunk_prev_scale = prev_scale
         in_chunk_ids: set[int] = set()
 
-        while len(chunk) < req.chunk_size:
-            pick = _find_one_pick(
-                chunk_prev_bpm=chunk_prev_bpm,
-                chunk_prev_key=chunk_prev_key,
-                chunk_prev_scale=chunk_prev_scale,
-                in_chunk_ids=in_chunk_ids,
+        # Pre-build the per-chunk candidate list. Fixed for this chunk;
+        # filtering by chunk-local smoothness happens inside the picker
+        # because chunk_prev_* shifts after every pick.
+        cand_idxs: list[int] = [
+            int(i)
+            for i in np.argsort(-scores)
+            if cached.ids[i] not in visited
+            and (allowed_ids is None or cached.ids[i] in allowed_ids)
+        ]
+
+        def _meta(idx: int) -> tuple[float | None, str | None, str | None]:
+            if not needs_meta:
+                return (None, None, None)
+            m = track_meta.get(cached.ids[idx])
+            return m if m is not None else (None, None, None)
+
+        while len(chunk) < req.chunk_size and cand_idxs:
+            best = _argmax_admissible(
+                cand_idxs,
+                state,
+                score_fn=lambda i: float(scores[i]),
+                artist_title_fn=lambda i: tags_lookup.get(
+                    int(cached.ids[i]), (None, None)
+                ),
+                filter_fn=lambda i, _bpm=chunk_prev_bpm, _key=chunk_prev_key, _scale=chunk_prev_scale: (
+                    cached.ids[i] not in in_chunk_ids
+                    and _smoothness_ok(*_meta(i), _bpm, _key, _scale)
+                ),
             )
-            if pick is None:
+            if best < 0:
                 break
-            idx, tid, artist, title = pick
-            cand_bpm = cand_key = cand_scale = None
-            if needs_meta:
-                meta = track_meta.get(tid)
-                if meta is not None:
-                    cand_bpm, cand_key, cand_scale = meta
+            idx = cand_idxs.pop(best)
+            tid = cached.ids[idx]
+            cand_bpm, cand_key, cand_scale = _meta(idx)
+            artist, title = tags_lookup.get(int(tid), (None, None))
             in_chunk_ids.add(tid)
             chunk.append(
                 (
@@ -625,7 +632,7 @@ def generate_chained_playlist(
                 )
             )
             # Record inline so the next pick in this chunk sees this
-            # one in the cooldown window and dedup state.
+            # one in the cooldown and dedup state.
             state.record(artist, title)
             chunk_prev_bpm = cand_bpm if cand_bpm is not None else chunk_prev_bpm
             chunk_prev_key = cand_key if cand_key else chunk_prev_key
@@ -708,24 +715,20 @@ def generate_vibe_playlist(
     if req.shuffle:
         random.Random(req.seed).shuffle(pool)
 
-    # Pick by effective score: the row's pre-computed fitness minus
-    # the cooldown penalty for its artist. Re-evaluating per pick is
-    # O(n²), which is fine because the pool has hundreds of rows at
-    # most. Dedup is the only hard filter.
+    # Pick by effective fitness (raw fitness − cooldown penalty). The
+    # diversity logic is encapsulated in ``_argmax_admissible``; this
+    # loop just owns the pool and the record step.
     state = _DiversityState(req.diversity)
     chosen: list[dict] = []
     remaining = [(fitness(r), r) for r in pool]
 
     while len(chosen) < req.n and remaining:
-        best_i = -1
-        best_score = -math.inf
-        for i, (fit, row) in enumerate(remaining):
-            if state.admit(row.get("artist"), row.get("title")) == "duplicate":
-                continue
-            eff = fit - state.cooldown_penalty(row.get("artist"))
-            if eff > best_score:
-                best_score = eff
-                best_i = i
+        best_i = _argmax_admissible(
+            remaining,
+            state,
+            score_fn=lambda c: c[0],
+            artist_title_fn=lambda c: (c[1].get("artist"), c[1].get("title")),
+        )
         if best_i < 0:
             break
         _fit, row = remaining.pop(best_i)
