@@ -91,18 +91,27 @@ class TestBuildTrackFilter:
         assert f.loudness_min is None and f.loudness_max == -10
 
     def test_set_membership_passes_through(self):
-        f = build_track_filter(key=["A", "B"], style=["Electronic"])
+        f = build_track_filter(key=["A", "B"], genre=["Electronic"], style=["House"])
         assert f.key == ["A", "B"]
-        assert f.styles == ["Electronic"]
+        assert f.genres == ["Electronic"]
+        assert f.styles == ["House"]
 
     def test_style_min_and_mode(self):
         f = build_track_filter(
-            style=["Rock"],
+            genre=["Rock"],
             style_min=0.5,
             style_mode="all",
         )
         assert f.style_min_probability == 0.5
         assert f.style_match == "all"
+
+    def test_separator_in_genre_rejected(self):
+        with pytest.raises(ValueError):
+            build_track_filter(genre=["Electronic---House"])
+
+    def test_separator_in_style_rejected(self):
+        with pytest.raises(ValueError):
+            build_track_filter(style=["Electronic---House"])
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +127,8 @@ class TestFilterBody:
                 "loudness": {"lte": -10},
                 "key": ["A", "B"],
                 "scale": "minor",
-                "style": ["Electronic"],
+                "genre": ["Electronic"],
+                "style": ["House"],
                 "style_min": 0.5,
                 "style_mode": "all",
             }
@@ -128,7 +138,8 @@ class TestFilterBody:
         assert f.loudness_min is None and f.loudness_max == -10
         assert f.key == ["A", "B"]
         assert f.scale == "minor"
-        assert f.styles == ["Electronic"]
+        assert f.genres == ["Electronic"]
+        assert f.styles == ["House"]
         assert f.style_min_probability == 0.5
         assert f.style_match == "all"
 
@@ -141,6 +152,14 @@ class TestFilterBody:
         url_filter = build_track_filter(bpm="120..130", key=["A"])
         for slot in body_filter.__slots__:
             assert getattr(body_filter, slot) == getattr(url_filter, slot)
+
+    def test_body_rejects_separator_in_genre(self):
+        with pytest.raises(ValueError):
+            FilterBody.model_validate({"genre": ["Electronic---House"]})
+
+    def test_body_rejects_separator_in_style(self):
+        with pytest.raises(ValueError):
+            FilterBody.model_validate({"style": ["Electronic---House"]})
 
 
 # ---------------------------------------------------------------------------

@@ -5,8 +5,9 @@ Covers:
 * :func:`harmonie.features.top_styles` (label/probability mapping).
 * Migration shape — ``style_activations`` column + ``track_styles`` table.
 * DB roundtrip — write/read of activation BLOB and top-K style rows.
-* Filter helpers — ``filter_ids_by_style``, ``list_styles``.
-* API filter — ``GET /tracks?styles=...`` and the ``GET /styles`` endpoint.
+* Filter helpers — ``filter_ids_by_style``, ``list_styles``, ``list_genres``.
+* API filter — ``GET /tracks?genre=...&style=...``, ``GET /styles``,
+  ``GET /genres``.
 """
 
 from __future__ import annotations
@@ -238,11 +239,75 @@ def test_db_remove_cascades_to_styles(tmp_db_path):
 
 
 # ---------------------------------------------------------------------------
-# filter_ids_by_style and list_styles
+# filter_ids_by_style, list_styles, list_genres
 # ---------------------------------------------------------------------------
 
 
-def test_filter_ids_by_style_exact_and_prefix(tmp_db_path):
+def test_filter_ids_by_style_genre_axis(tmp_db_path):
+    from harmonie.db import Database
+
+    db = Database(tmp_db_path)
+    try:
+        emb = np.zeros(4, dtype=np.float32)
+        a = _upsert_with_styles(
+            db, "/a", emb, top_styles_rows=[("Electronic---House", 0.9)]
+        )
+        b = _upsert_with_styles(
+            db, "/b", emb, top_styles_rows=[("Electronic---Techno", 0.8)]
+        )
+        _upsert_with_styles(db, "/c", emb, top_styles_rows=[("Rock---Punk", 0.7)])
+
+        # Genre axis: every Electronic--* track.
+        assert db.filter_ids_by_style(genres=["Electronic"]) == {a, b}
+        # min_probability gate keeps only the high-probability row.
+        assert db.filter_ids_by_style(genres=["Electronic"], min_probability=0.85) == {
+            a
+        }
+    finally:
+        db.close()
+
+
+def test_filter_ids_by_style_style_axis(tmp_db_path):
+    """Style suffix matches across genres."""
+    from harmonie.db import Database
+
+    db = Database(tmp_db_path)
+    try:
+        emb = np.zeros(4, dtype=np.float32)
+        a = _upsert_with_styles(
+            db, "/a", emb, top_styles_rows=[("Electronic---House", 0.9)]
+        )
+        b = _upsert_with_styles(db, "/b", emb, top_styles_rows=[("Pop---House", 0.8)])
+        _upsert_with_styles(db, "/c", emb, top_styles_rows=[("Rock---Punk", 0.7)])
+
+        # Style axis: every *---House track.
+        assert db.filter_ids_by_style(styles=["House"]) == {a, b}
+    finally:
+        db.close()
+
+
+def test_filter_ids_by_style_combined_axes_exact_lookup(tmp_db_path):
+    """Single genre + single style collapses to exact-label match."""
+    from harmonie.db import Database
+
+    db = Database(tmp_db_path)
+    try:
+        emb = np.zeros(4, dtype=np.float32)
+        a = _upsert_with_styles(
+            db, "/a", emb, top_styles_rows=[("Electronic---House", 0.9)]
+        )
+        _upsert_with_styles(db, "/b", emb, top_styles_rows=[("Pop---House", 0.8)])
+        _upsert_with_styles(
+            db, "/c", emb, top_styles_rows=[("Electronic---Techno", 0.7)]
+        )
+
+        # Both axes given: exactly Electronic---House.
+        assert db.filter_ids_by_style(genres=["Electronic"], styles=["House"]) == {a}
+    finally:
+        db.close()
+
+
+def test_filter_ids_by_style_match_all(tmp_db_path):
     from harmonie.db import Database
 
     db = Database(tmp_db_path)
@@ -252,39 +317,30 @@ def test_filter_ids_by_style_exact_and_prefix(tmp_db_path):
             db,
             "/a",
             emb,
-            top_styles_rows=[("Electronic---House", 0.9)],
+            top_styles_rows=[
+                ("Electronic---House", 0.9),
+                ("Rock---Punk", 0.6),
+            ],
         )
         b = _upsert_with_styles(
-            db,
-            "/b",
-            emb,
-            top_styles_rows=[("Electronic---Techno", 0.8)],
-        )
-        c = _upsert_with_styles(
-            db,
-            "/c",
-            emb,
-            top_styles_rows=[("Rock---Punk", 0.7)],
+            db, "/b", emb, top_styles_rows=[("Electronic---House", 0.8)]
         )
 
-        # Exact match: just track A.
-        assert db.filter_ids_by_style(["Electronic---House"]) == {a}
+        # match=all needs both genre constraints to be present on a track.
+        assert db.filter_ids_by_style(genres=["Electronic", "Rock"], match="all") == {a}
+        # match=any (default) is the union.
+        assert db.filter_ids_by_style(genres=["Electronic", "Rock"]) == {a, b}
+    finally:
+        db.close()
 
-        # Prefix match: A and B (whole Electronic branch).
-        assert db.filter_ids_by_style(["Electronic"]) == {a, b}
 
-        # min_probability gate excludes B (0.8) but keeps A (0.9).
-        assert db.filter_ids_by_style(["Electronic"], min_probability=0.85) == {a}
+def test_filter_ids_by_style_empty_returns_empty(tmp_db_path):
+    from harmonie.db import Database
 
-        # Multiple needles, "any" mode.
-        assert db.filter_ids_by_style(["Electronic---House", "Rock---Punk"]) == {a, c}
-
-        # "all" mode requires every needle to be present on a track.
-        # A has House but not Punk → empty.
-        assert (
-            db.filter_ids_by_style(["Electronic---House", "Rock---Punk"], match="all")
-            == set()
-        )
+    db = Database(tmp_db_path)
+    try:
+        assert db.filter_ids_by_style() == set()
+        assert db.filter_ids_by_style(genres=[], styles=[]) == set()
     finally:
         db.close()
 
@@ -296,10 +352,7 @@ def test_list_styles_aggregates_by_count(tmp_db_path):
     try:
         emb = np.zeros(4, dtype=np.float32)
         _upsert_with_styles(
-            db,
-            "/a",
-            emb,
-            top_styles_rows=[("Electronic---House", 0.9)],
+            db, "/a", emb, top_styles_rows=[("Electronic---House", 0.9)]
         )
         _upsert_with_styles(
             db,
@@ -308,10 +361,7 @@ def test_list_styles_aggregates_by_count(tmp_db_path):
             top_styles_rows=[("Electronic---House", 0.5), ("Rock---Punk", 0.4)],
         )
         _upsert_with_styles(
-            db,
-            "/c",
-            emb,
-            top_styles_rows=[("Electronic---House", 0.7)],
+            db, "/c", emb, top_styles_rows=[("Electronic---House", 0.7)]
         )
 
         styles = db.list_styles()
@@ -329,12 +379,52 @@ def test_list_styles_aggregates_by_count(tmp_db_path):
         names_high = {s["style"] for s in styles_high}
         assert "Rock---Punk" not in names_high
         assert "Electronic---House" in names_high
+
+        # genre= scopes the listing to one branch.
+        only_electronic = db.list_styles(genre="Electronic")
+        assert {s["style"] for s in only_electronic} == {"Electronic---House"}
+    finally:
+        db.close()
+
+
+def test_list_genres_aggregates_top_level(tmp_db_path):
+    from harmonie.db import Database
+
+    db = Database(tmp_db_path)
+    try:
+        emb = np.zeros(4, dtype=np.float32)
+        _upsert_with_styles(
+            db,
+            "/a",
+            emb,
+            top_styles_rows=[
+                ("Electronic---House", 0.9),
+                ("Electronic---Techno", 0.5),
+            ],
+        )
+        _upsert_with_styles(db, "/b", emb, top_styles_rows=[("Rock---Punk", 0.7)])
+        _upsert_with_styles(
+            db, "/c", emb, top_styles_rows=[("Electronic---House", 0.6)]
+        )
+
+        genres = db.list_genres()
+        by_genre = {g["genre"]: g for g in genres}
+        # Electronic has 3 rows across 2 distinct styles.
+        assert by_genre["Electronic"]["track_count"] == 3
+        assert by_genre["Electronic"]["style_count"] == 2
+        assert by_genre["Rock"]["track_count"] == 1
+        assert by_genre["Rock"]["style_count"] == 1
+        # min_probability gates rows the same way list_styles does.
+        only_high = db.list_genres(min_probability=0.6)
+        by_high = {g["genre"]: g for g in only_high}
+        assert by_high["Electronic"]["track_count"] == 2  # 0.9 and 0.6 survive
+        assert by_high["Rock"]["track_count"] == 1
     finally:
         db.close()
 
 
 # ---------------------------------------------------------------------------
-# API integration: GET /tracks?styles=... and GET /styles
+# API integration: GET /tracks?genre=...&style=..., GET /styles, GET /genres
 # ---------------------------------------------------------------------------
 
 
@@ -350,22 +440,16 @@ def api_client_with_styles(tmp_path, make_db):
     db, index = make_db("api.db")
     emb = np.zeros(4, dtype=np.float32)
     _upsert_with_styles(
-        db,
-        "/lib/house.flac",
-        emb,
-        top_styles_rows=[("Electronic---House", 0.9)],
+        db, "/lib/house.flac", emb, top_styles_rows=[("Electronic---House", 0.9)]
     )
     _upsert_with_styles(
-        db,
-        "/lib/techno.flac",
-        emb,
-        top_styles_rows=[("Electronic---Techno", 0.8)],
+        db, "/lib/techno.flac", emb, top_styles_rows=[("Electronic---Techno", 0.8)]
     )
     _upsert_with_styles(
-        db,
-        "/lib/punk.flac",
-        emb,
-        top_styles_rows=[("Rock---Punk", 0.7)],
+        db, "/lib/punk.flac", emb, top_styles_rows=[("Rock---Punk", 0.7)]
+    )
+    _upsert_with_styles(
+        db, "/lib/pop_house.flac", emb, top_styles_rows=[("Pop---House", 0.6)]
     )
 
     # Build the app without the production lifespan to skip TF and the
@@ -395,27 +479,52 @@ def api_client_with_styles(tmp_path, make_db):
     return TestClient(app), db
 
 
-def test_api_list_tracks_filters_by_style_prefix(api_client_with_styles):
+def test_api_list_tracks_filters_by_genre(api_client_with_styles):
+    """``genre=Electronic`` returns every Electronic--* track."""
     client, _db = api_client_with_styles
-    r = client.get("/api/v1/tracks", params=[("style", "Electronic")])
+    r = client.get("/api/v1/tracks", params=[("genre", "Electronic")])
     assert r.status_code == 200, r.text
-    body = r.json()
-    titles = sorted(item["path"] for item in body["items"])
-    assert titles == ["/lib/house.flac", "/lib/techno.flac"]
-    # Each item carries its own style preview.
-    by_path = {it["path"]: it for it in body["items"]}
-    assert by_path["/lib/house.flac"]["styles"][0]["style"] == "Electronic---House"
+    paths = sorted(item["path"] for item in r.json()["items"])
+    assert paths == ["/lib/house.flac", "/lib/techno.flac"]
 
 
-def test_api_list_tracks_filters_by_exact_style(api_client_with_styles):
+def test_api_list_tracks_filters_by_style_across_genres(api_client_with_styles):
+    """``style=House`` returns every *--House track regardless of genre."""
+    client, _db = api_client_with_styles
+    r = client.get("/api/v1/tracks", params=[("style", "House")])
+    assert r.status_code == 200, r.text
+    paths = sorted(item["path"] for item in r.json()["items"])
+    assert paths == ["/lib/house.flac", "/lib/pop_house.flac"]
+
+
+def test_api_list_tracks_filters_by_genre_and_style(api_client_with_styles):
+    """Both axes given → exact label match."""
     client, _db = api_client_with_styles
     r = client.get(
         "/api/v1/tracks",
-        params=[("style", "Electronic---Techno")],
+        params=[("genre", "Electronic"), ("style", "House")],
     )
     assert r.status_code == 200, r.text
-    body = r.json()
-    assert [it["path"] for it in body["items"]] == ["/lib/techno.flac"]
+    paths = [item["path"] for item in r.json()["items"]]
+    assert paths == ["/lib/house.flac"]
+
+
+def test_api_list_tracks_rejects_separator_in_genre(api_client_with_styles):
+    client, _db = api_client_with_styles
+    r = client.get(
+        "/api/v1/tracks",
+        params=[("genre", "Electronic---House")],
+    )
+    assert r.status_code == 400
+
+
+def test_api_list_tracks_rejects_separator_in_style(api_client_with_styles):
+    client, _db = api_client_with_styles
+    r = client.get(
+        "/api/v1/tracks",
+        params=[("style", "Electronic---House")],
+    )
+    assert r.status_code == 400
 
 
 def test_api_styles_endpoint_lists_known_styles(api_client_with_styles):
@@ -427,9 +536,24 @@ def test_api_styles_endpoint_lists_known_styles(api_client_with_styles):
     assert names == [
         "Electronic---House",
         "Electronic---Techno",
+        "Pop---House",
         "Rock---Punk",
     ]
-    assert body["total"] == 3
+    assert body["total"] == 4
+
+
+def test_api_styles_endpoint_filters_by_genre(api_client_with_styles):
+    client, _db = api_client_with_styles
+    r = client.get("/api/v1/styles", params={"genre": "Electronic"})
+    assert r.status_code == 200, r.text
+    names = sorted(s["style"] for s in r.json()["items"])
+    assert names == ["Electronic---House", "Electronic---Techno"]
+
+
+def test_api_styles_endpoint_rejects_separator_in_genre(api_client_with_styles):
+    client, _db = api_client_with_styles
+    r = client.get("/api/v1/styles", params={"genre": "Electronic---House"})
+    assert r.status_code == 400
 
 
 def test_api_styles_endpoint_respects_min_probability(api_client_with_styles):
@@ -441,3 +565,25 @@ def test_api_styles_endpoint_respects_min_probability(api_client_with_styles):
     assert r.status_code == 200, r.text
     names = [s["style"] for s in r.json()["items"]]
     assert names == ["Electronic---House"]  # only the 0.9 row clears 0.85
+
+
+def test_api_genres_endpoint_lists_top_level(api_client_with_styles):
+    client, _db = api_client_with_styles
+    r = client.get("/api/v1/genres")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    by_name = {g["genre"]: g for g in body["items"]}
+    assert set(by_name) == {"Electronic", "Pop", "Rock"}
+    assert by_name["Electronic"]["style_count"] == 2
+    assert by_name["Electronic"]["track_count"] == 2
+    assert by_name["Rock"]["style_count"] == 1
+    assert body["total"] == 3
+
+
+def test_api_genres_endpoint_respects_min_probability(api_client_with_styles):
+    client, _db = api_client_with_styles
+    r = client.get("/api/v1/genres", params={"style_min": 0.85})
+    assert r.status_code == 200, r.text
+    names = [g["genre"] for g in r.json()["items"]]
+    # Only Electronic---House (0.9) survives the 0.85 gate.
+    assert names == ["Electronic"]

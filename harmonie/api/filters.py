@@ -13,10 +13,16 @@ Two surfaces map to a single internal :class:`harmonie.db.TrackFilter`:
 
   * Set membership: repeat the parameter (``key=A&key=B``).
 
-  * Style filter is the same: ``style=Electronic`` (prefix on the genre side)
-    or ``style=Electronic---House`` (exact). ``style_min`` gates by minimum
-    classifier probability; ``style_mode=any|all`` switches between OR and
-    AND semantics.
+  * Genre/style filtering uses two independent axes::
+
+      genre=Electronic              # every Electronic---* label
+      style=House                   # every *---House label, any genre
+      genre=Electronic&style=House  # exact Electronic---House
+
+    Either or both axes may be supplied, and either may be repeated for
+    OR. ``style_min`` gates by minimum classifier probability;
+    ``style_mode=any|all`` switches between OR and AND across all
+    requested constraints.
 
 * **JSON bodies** (used by ``POST /playlists`` under ``filter``)::
 
@@ -25,17 +31,21 @@ Two surfaces map to a single internal :class:`harmonie.db.TrackFilter`:
         "loudness": { "lte": -10 },
         "key":      ["A", "B"],
         "scale":    "minor",
-        "style":    ["Electronic"],
+        "genre":    ["Electronic"],
+        "style":    ["House"],
         "style_min": 0.5,
         "style_mode": "any"
       }
 
 Both shapes build the same ``TrackFilter``.
+
+Genre and style values must not contain ``---`` — the separator is an
+internal label format. Use the two-parameter form for an exact label.
 """
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..db import TrackFilter
 
@@ -61,6 +71,26 @@ class FloatRange(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Genre/style validation
+# ---------------------------------------------------------------------------
+
+
+def _reject_separator(values: list[str] | None, field: str) -> list[str] | None:
+    """Reject ``---`` in genre/style filter values. The separator is an
+    internal label format; clients compose exact labels by passing both
+    ``genre`` and ``style``."""
+    if not values:
+        return values
+    for v in values:
+        if "---" in v:
+            raise ValueError(
+                f"{field} values must not contain '---'; use genre and style "
+                f"together for an exact label (got {v!r})"
+            )
+    return values
+
+
+# ---------------------------------------------------------------------------
 # Body filter
 # ---------------------------------------------------------------------------
 
@@ -76,12 +106,19 @@ class FilterBody(BaseModel):
     loudness: FloatRange | None = None
     key: list[str] | None = None
     scale: str | None = None
+    genre: list[str] | None = Field(
+        None,
+        description=(
+            "Genre filter — left side of a Discogs ``Genre---Style`` label. "
+            "Each entry matches every ``Genre---*`` row."
+        ),
+    )
     style: list[str] | None = Field(
         None,
         description=(
-            "Discogs-400 style filter. Each entry is either a full "
-            "``Genre---Style`` label (exact) or a bare ``Genre`` (prefix on "
-            "the whole branch)."
+            "Style filter — right side of a Discogs ``Genre---Style`` "
+            "label. Each entry matches every ``*---Style`` row across "
+            "genres. Combine with ``genre`` for an exact label."
         ),
     )
     style_min: float = Field(
@@ -93,8 +130,13 @@ class FilterBody(BaseModel):
     style_mode: str = Field(
         "any",
         pattern="^(any|all)$",
-        description="``any`` (default) or ``all`` of the requested styles.",
+        description="``any`` (default) or ``all`` of the requested constraints.",
     )
+
+    @field_validator("genre", "style")
+    @classmethod
+    def _no_separator(cls, v: list[str] | None, info) -> list[str] | None:
+        return _reject_separator(v, info.field_name)
 
     def to_track_filter(self) -> TrackFilter:
         bpm = self.bpm or FloatRange()
@@ -109,6 +151,7 @@ class FilterBody(BaseModel):
             loudness_max=loud.lte,
             key=self.key,
             scale=self.scale,
+            genres=self.genre,
             styles=self.style,
             style_min_probability=self.style_min,
             style_match=self.style_mode,
@@ -148,6 +191,7 @@ def build_track_filter(
     loudness: str | None = None,
     key: list[str] | None = None,
     scale: str | None = None,
+    genre: list[str] | None = None,
     style: list[str] | None = None,
     style_min: float = 0.0,
     style_mode: str = "any",
@@ -156,11 +200,15 @@ def build_track_filter(
 
     Numeric range params accept the ``120..130`` / ``120..`` / ``..130`` /
     ``128`` shorthand documented in :func:`parse_range`. Set-membership params
-    (``key``, ``style``) are passed through as lists.
+    (``key``, ``genre``, ``style``) are passed through as lists.
+
+    Genre and style values must not contain ``---``.
     """
     bpm_r = parse_range(bpm)
     dance_r = parse_range(danceability)
     loud_r = parse_range(loudness)
+    genre = _reject_separator(genre, "genre")
+    style = _reject_separator(style, "style")
     return TrackFilter(
         bpm_min=bpm_r.gte,
         bpm_max=bpm_r.lte,
@@ -170,6 +218,7 @@ def build_track_filter(
         loudness_max=loud_r.lte,
         key=key,
         scale=scale,
+        genres=genre,
         styles=style,
         style_min_probability=style_min,
         style_match=style_mode,

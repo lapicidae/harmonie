@@ -45,6 +45,18 @@ class TrackFilter:
     """Optional descriptor-based filters for list / similar / playlist queries.
 
     All fields are inclusive ranges or set memberships. ``None`` = no filter.
+
+    Discogs-400 labels are two-level (``Genre---Style``). The classifier
+    produces them as a single string but they're filtered along two
+    independent axes:
+
+    * ``genres`` — left side. ``["Electronic"]`` matches every
+      ``Electronic---*`` label.
+    * ``styles`` — right side. ``["House"]`` matches every
+      ``*---House`` label across genres.
+
+    Supplying one entry on each axis collapses to an exact-label lookup
+    (``Genre---Style``) — see :meth:`Database.filter_ids_by_style`.
     """
 
     __slots__ = (
@@ -56,6 +68,7 @@ class TrackFilter:
         "danceability_max",
         "loudness_min",
         "loudness_max",
+        "genres",
         "styles",
         "style_min_probability",
         "style_match",
@@ -72,6 +85,7 @@ class TrackFilter:
         danceability_max: float | None = None,
         loudness_min: float | None = None,
         loudness_max: float | None = None,
+        genres: list[str] | None = None,
         styles: list[str] | None = None,
         style_min_probability: float = 0.0,
         style_match: str = "any",
@@ -84,14 +98,15 @@ class TrackFilter:
         self.danceability_max = danceability_max
         self.loudness_min = loudness_min
         self.loudness_max = loudness_max
+        self.genres = list(genres) if genres else None
         self.styles = list(styles) if styles else None
         self.style_min_probability = float(style_min_probability)
         self.style_match = style_match
 
     def to_sql(self) -> tuple[str, list[Any]]:
-        """SQL fragment for the *tracks* table only. Style filtering is
-        applied separately via :meth:`Database.filter_ids_by_style` because
-        it lives in a child table."""
+        """SQL fragment for the *tracks* table only. Genre/style filtering
+        is applied separately via :meth:`Database.filter_ids_by_style`
+        because it lives in a child table."""
         clauses: list[str] = []
         params: list[Any] = []
         if self.bpm_min is not None:
@@ -124,15 +139,15 @@ class TrackFilter:
         return " AND ".join(clauses), params
 
     def has_style_filter(self) -> bool:
-        return bool(self.styles)
+        return bool(self.genres or self.styles)
 
     def is_empty(self) -> bool:
-        if self.styles:
+        if self.genres or self.styles:
             return False
         return all(
             getattr(self, slot) is None
             for slot in self.__slots__
-            if slot not in ("styles", "style_min_probability", "style_match")
+            if slot not in ("genres", "styles", "style_min_probability", "style_match")
         )
 
 
@@ -589,71 +604,132 @@ class Database:
 
     def filter_ids_by_style(
         self,
-        styles: list[str],
         *,
+        genres: list[str] | None = None,
+        styles: list[str] | None = None,
         min_probability: float = 0.0,
         match: str = "any",
     ) -> set[int]:
-        """Track IDs whose ``track_styles`` rows match the given style names.
+        """Track IDs whose ``track_styles`` rows match the given genre and
+        style constraints.
 
-        ``match='any'`` (default): track has at least one of the styles above
-        ``min_probability``.
-        ``match='all'``: track has every style above ``min_probability``.
+        ``genres`` matches the left side of a ``Genre---Style`` label;
+        ``styles`` matches the right side. Either or both may be supplied.
 
-        Style names match either exactly or as a prefix when the caller
-        passes a bare genre like ``"Electronic"`` (matches all
-        ``"Electronic---*"``). Passing the full ``"Genre---Style"`` form is
-        always exact.
+        With one entry on each axis the implementation collapses to a single
+        ``style = 'Genre---Style'`` equality lookup (cheaper than two LIKEs
+        intersected). Otherwise each entry contributes one prefix (genres)
+        or suffix (styles) ``LIKE`` clause OR'd together — or AND'd when
+        ``match='all'``.
+
+        Empty inputs return the empty set.
         """
-        if not styles:
+        genres = genres or []
+        styles = styles or []
+        if not genres and not styles:
             return set()
-        # Build an OR over `style = ?` (exact) or `style LIKE ?` (prefix).
+
         clauses: list[str] = []
         params: list[Any] = []
-        for s in styles:
-            if "---" in s:
-                clauses.append("style = ?")
-                params.append(s)
-            else:
+        if len(genres) == 1 and len(styles) == 1:
+            clauses.append("style = ?")
+            params.append(f"{genres[0]}---{styles[0]}")
+            n_constraints = 1
+        else:
+            for g in genres:
                 clauses.append("style LIKE ?")
-                params.append(f"{s}---%")
-        where_styles = " OR ".join(clauses)
+                params.append(f"{g}---%")
+            for s in styles:
+                clauses.append("style LIKE ?")
+                params.append(f"%---{s}")
+            n_constraints = len(genres) + len(styles)
+
+        where = " OR ".join(clauses)
         params.append(float(min_probability))
         cur = self._conn.execute(
             f"SELECT track_id, COUNT(DISTINCT style) AS hits "
             f"FROM track_styles "
-            f"WHERE ({where_styles}) AND probability >= ? "
+            f"WHERE ({where}) AND probability >= ? "
             f"GROUP BY track_id",
             tuple(params),
         )
         if match == "all":
-            need = len(styles)
-            return {int(r["track_id"]) for r in cur if int(r["hits"]) >= need}
+            return {int(r["track_id"]) for r in cur if int(r["hits"]) >= n_constraints}
         return {int(r["track_id"]) for r in cur}
 
-    def list_styles(self, *, min_probability: float = 0.0) -> list[dict]:
+    def list_styles(
+        self,
+        *,
+        min_probability: float = 0.0,
+        genre: str | None = None,
+    ) -> list[dict]:
         """Enumerate every style currently present in the DB.
 
         Returns a list of ``{style, track_count, mean_probability,
         max_probability}`` dicts ordered by ``track_count`` descending.
+
+        ``genre`` scopes the listing to one branch of the hierarchy, e.g.
+        ``genre="Electronic"`` returns only ``Electronic---*`` rows.
         """
+        clauses = ["probability >= ?"]
+        params: list[Any] = [float(min_probability)]
+        if genre:
+            clauses.append("style LIKE ?")
+            params.append(f"{genre}---%")
+        where = " AND ".join(clauses)
         cur = self._conn.execute(
-            """
+            f"""
             SELECT style,
                    COUNT(*) AS track_count,
                    AVG(probability) AS mean_probability,
                    MAX(probability) AS max_probability
               FROM track_styles
-             WHERE probability >= ?
+             WHERE {where}
              GROUP BY style
              ORDER BY track_count DESC, style ASC
             """,
-            (float(min_probability),),
+            tuple(params),
         )
         return [
             {
                 "style": str(r["style"]),
                 "track_count": int(r["track_count"]),
+                "mean_probability": float(r["mean_probability"]),
+                "max_probability": float(r["max_probability"]),
+            }
+            for r in cur
+        ]
+
+    def list_genres(self, *, min_probability: float = 0.0) -> list[dict]:
+        """Enumerate top-level genres present in the DB.
+
+        Returns a list of ``{genre, track_count, style_count,
+        mean_probability, max_probability}`` dicts ordered by
+        ``track_count`` descending. ``track_count`` counts ``track_styles``
+        rows under the genre — a track tagged with two ``Electronic---*``
+        styles contributes two rows. ``style_count`` is the number of
+        distinct sub-styles under the genre.
+        """
+        cur = self._conn.execute(
+            """
+            SELECT substr(style, 1, instr(style, '---') - 1) AS genre,
+                   COUNT(*) AS track_count,
+                   COUNT(DISTINCT style) AS style_count,
+                   AVG(probability) AS mean_probability,
+                   MAX(probability) AS max_probability
+              FROM track_styles
+             WHERE probability >= ?
+               AND instr(style, '---') > 0
+             GROUP BY genre
+             ORDER BY track_count DESC, genre ASC
+            """,
+            (float(min_probability),),
+        )
+        return [
+            {
+                "genre": str(r["genre"]),
+                "track_count": int(r["track_count"]),
+                "style_count": int(r["style_count"]),
                 "mean_probability": float(r["mean_probability"]),
                 "max_probability": float(r["max_probability"]),
             }
@@ -705,7 +781,8 @@ class Database:
                 params.extend(f_params)
             if filter.has_style_filter():
                 style_ids = self.filter_ids_by_style(
-                    filter.styles or [],
+                    genres=filter.genres,
+                    styles=filter.styles,
                     min_probability=filter.style_min_probability,
                     match=filter.style_match,
                 )
@@ -761,7 +838,8 @@ class Database:
         ids = {int(r["id"]) for r in cur}
         if filter is not None and filter.has_style_filter():
             style_ids = self.filter_ids_by_style(
-                filter.styles or [],
+                genres=filter.genres,
+                styles=filter.styles,
                 min_probability=filter.style_min_probability,
                 match=filter.style_match,
             )

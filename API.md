@@ -16,7 +16,8 @@ All endpoints are versioned under `/api/v1/`. If `HARMONIE_API_KEY` is set, ever
 | `GET`  | `/api/v1/tracks/{id}` | Full track record |
 | `GET`  | `/api/v1/tracks/{id}/similar` | Top-N similar tracks |
 | `GET`  | `/api/v1/tracks/resolve` | Find one track by `path` and/or tags |
-| `GET`  | `/api/v1/styles` | Enumerate Discogs-400 styles in the library |
+| `GET`  | `/api/v1/genres` | Enumerate top-level Discogs genres in the library |
+| `GET`  | `/api/v1/styles` | Enumerate Discogs-400 styles (optionally scoped by genre) |
 | `POST` | `/api/v1/playlists` | Build a playlist (mode set explicitly in the body) |
 
 OpenAPI docs are served at `/docs` (Swagger UI) and `/openapi.json`.
@@ -33,13 +34,16 @@ URL form (`/tracks`, `/tracks/{id}/similar`):
 ?bpm=..130           upper bound only
 ?bpm=128             exact value
 ?key=A&key=B         set membership (repeat the parameter)
-?style=Electronic    prefix match: every Electronic--* style
-?style=Electronic---House  exact label
+?genre=Electronic    every Electronic--- style
+?style=House         every ---House style across genres
+?genre=Electronic&style=House   exact Electronic---House
 ?style_min=0.5       only count style rows above this probability
-?style_mode=all      tracks must match every requested style (default: any)
+?style_mode=all      tracks must match every requested constraint (default: any)
 ```
 
-Available filter fields: `bpm`, `danceability`, `loudness`, `key`, `scale`, `style`, `style_min`, `style_mode`.
+Available filter fields: `bpm`, `danceability`, `loudness`, `key`, `scale`, `genre`, `style`, `style_min`, `style_mode`.
+
+Genre and style values must not contain `---`. The separator is an internal label format; pass both axes for an exact label.
 
 Body form (`POST /playlists` under `filter`):
 
@@ -50,7 +54,8 @@ Body form (`POST /playlists` under `filter`):
     "loudness": { "lte": -10 },
     "key":      ["A", "B"],
     "scale":    "minor",
-    "style":    ["Electronic"],
+    "genre":    ["Electronic"],
+    "style":    ["House"],
     "style_min": 0.5,
     "style_mode": "any"
   }
@@ -82,26 +87,45 @@ curl --get http://localhost:8842/api/v1/tracks/resolve \
 
 400 on an empty request, 404 if no strategy matches.
 
-### Styles
+### Genres and styles
 
-During scan, harmonie runs Essentia's Discogs-400 classifier head on the same Effnet embeddings used for similarity. Each track gets a 400-dimensional probability vector over Discogs styles like `Electronic---House`, `Hip Hop---Trap`, or `Rock---Punk`. The top 10 (and any above 5% probability) are stored as filterable rows; the full vector is kept as a BLOB for clustering.
+During scan, harmonie runs Essentia's Discogs-400 classifier head on the same Effnet embeddings used for similarity. Each track gets a 400-dimensional probability vector over labels like `Electronic---House`, `Hip Hop---Trap`, or `Rock---Punk`. The top 10 (and any above 5% probability) are stored as filterable rows; the full vector is kept as a BLOB for clustering.
+
+The taxonomy is two-level — a **genre** (left side) like `Electronic` or `Rock`, and a **style** (right side) like `House` or `Punk`. The two axes are filtered independently:
 
 ```bash
-# Filter tracks by exact style.
-curl 'http://localhost:8842/api/v1/tracks?style=Electronic---House' | json_pp
+# All Electronic tracks (any style under the genre).
+curl --get 'http://localhost:8842/api/v1/tracks' --data-urlencode 'genre=Electronic' | json_pp
 
-# Prefix match: every Electronic style.
-curl --get 'http://localhost:8842/api/v1/tracks' --data-urlencode 'style=Electronic' | json_pp
+# All House tracks across genres (Electronic House, Pop House, ...).
+curl 'http://localhost:8842/api/v1/tracks?style=House' | json_pp
 
-# Multiple styles. Default match is "any"; use style_mode=all for AND.
+# Both axes → exact label. This is the cheapest form (single indexed equality).
 curl --get 'http://localhost:8842/api/v1/tracks' \
-  --data-urlencode 'style=Electronic---House' \
-  --data-urlencode 'style=Electronic---Techno' | json_pp
+  --data-urlencode 'genre=Electronic' \
+  --data-urlencode 'style=House' | json_pp
+
+# Multiple values on either axis. Default is `any`; use style_mode=all for AND.
+curl --get 'http://localhost:8842/api/v1/tracks' \
+  --data-urlencode 'genre=Electronic' \
+  --data-urlencode 'genre=Rock' | json_pp
 
 # Demand confidence: only count style rows above 0.5 probability.
-curl 'http://localhost:8842/api/v1/tracks?style=Electronic&style_min=0.5' | json_pp
+curl 'http://localhost:8842/api/v1/tracks?genre=Electronic&style_min=0.5' | json_pp
+```
 
-# Enumerate styles present in the library.
+`---` in a `genre` or `style` value is rejected with a 400 — the separator is internal. Use the two-axis form for an exact label.
+
+Discovery endpoints walk the hierarchy:
+
+```bash
+# Top-level genres present in the library.
+curl 'http://localhost:8842/api/v1/genres' | json_pp
+
+# Styles within one genre.
+curl 'http://localhost:8842/api/v1/styles?genre=Electronic' | json_pp
+
+# Every style, gated by probability.
 curl 'http://localhost:8842/api/v1/styles?style_min=0.5' | json_pp
 ```
 
@@ -314,7 +338,8 @@ done
 
 # Find every Hard Techno track at 140+ BPM, sorted by BPM ascending.
 curl --get http://localhost:8842/api/v1/tracks \
-  --data-urlencode 'style=Electronic---Hard Techno' \
+  --data-urlencode 'genre=Electronic' \
+  --data-urlencode 'style=Hard Techno' \
   --data 'bpm=140..' --data 'order_by=bpm' | json_pp
 
 # Resolve a track by tags, then ask for 20 similar with key compatibility.

@@ -89,6 +89,22 @@ class StyleList(BaseModel):
     total: int
 
 
+class GenreEnumeration(BaseModel):
+    genre: str
+    track_count: int
+    style_count: int = Field(
+        ...,
+        description="Number of distinct sub-styles present under this genre.",
+    )
+    mean_probability: float
+    max_probability: float
+
+
+class GenreList(BaseModel):
+    items: list[GenreEnumeration]
+    total: int
+
+
 # ---------------------------------------------------------------------------
 # Resolve (find one track by path/tags)
 # ---------------------------------------------------------------------------

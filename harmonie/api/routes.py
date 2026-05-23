@@ -28,6 +28,8 @@ from ..similarity import find_similar_to_id
 from .filters import build_track_filter
 from .schemas import (
     DriftPlaylist,
+    GenreEnumeration,
+    GenreList,
     MatchOut,
     PlaylistBody,
     PlaylistResult,
@@ -169,8 +171,18 @@ def filter_query(
     style: list[str] | None = Query(
         None,
         description=(
-            "Discogs-400 style filter. ``Genre---Style`` matches exactly; "
-            "a bare ``Genre`` matches the whole branch. Repeatable."
+            "Style filter — right side of a Discogs ``Genre---Style`` "
+            "label. ``style=House`` matches every ``*---House`` row "
+            "across genres. Combine with ``genre`` for an exact label. "
+            "Repeatable; values must not contain ``---``."
+        ),
+    ),
+    genre: list[str] | None = Query(
+        None,
+        description=(
+            "Genre filter — left side of a Discogs ``Genre---Style`` "
+            "label. ``genre=Electronic`` matches every ``Electronic---*`` "
+            "row. Repeatable; values must not contain ``---``."
         ),
     ),
     style_min: float = Query(
@@ -182,11 +194,13 @@ def filter_query(
     style_mode: str = Query(
         "any",
         pattern="^(any|all)$",
-        description="``any`` (default) or ``all`` of the requested styles.",
+        description=(
+            "``any`` (default) or ``all`` of the requested genre/style constraints."
+        ),
     ),
 ) -> TrackFilter:
-    """Compose a :class:`TrackFilter` from the eight query-string filter
-    parameters shared by ``GET /tracks`` and ``GET /tracks/{id}/similar``.
+    """Compose a :class:`TrackFilter` from the query-string filter parameters
+    shared by ``GET /tracks`` and ``GET /tracks/{id}/similar``.
     """
     try:
         return build_track_filter(
@@ -195,14 +209,13 @@ def filter_query(
             loudness=loudness,
             key=key,
             scale=scale,
+            genre=genre,
             style=style,
             style_min=style_min,
             style_mode=style_mode,
         )
     except ValueError as e:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, f"invalid range filter: {e}"
-        ) from e
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid filter: {e}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +351,27 @@ def similar_to(
     )
 
 
-# ---- styles --------------------------------------------------------------
+# ---- genres / styles -----------------------------------------------------
+
+
+@api_router.get("/genres", response_model=GenreList)
+def list_genres(
+    db: Database = Depends(get_db),
+    style_min: float = Query(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description="Only count style rows whose probability is at least this high.",
+    ),
+) -> GenreList:
+    """Enumerate top-level genres present in the database. Each entry is
+    the left side of a Discogs ``Genre---Style`` label (``Electronic``,
+    ``Rock``, ...) with aggregate counts."""
+    rows = db.list_genres(min_probability=style_min)
+    return GenreList(
+        items=[GenreEnumeration(**r) for r in rows],
+        total=len(rows),
+    )
 
 
 @api_router.get("/styles", response_model=StyleList)
@@ -348,12 +381,24 @@ def list_styles(
         0.0,
         ge=0.0,
         le=1.0,
-        description=("Only count style rows whose probability is at least this high."),
+        description="Only count style rows whose probability is at least this high.",
+    ),
+    genre: str | None = Query(
+        None,
+        description=(
+            "Scope the listing to one genre branch — only ``<genre>---*`` "
+            "rows are returned. Must not contain ``---``."
+        ),
     ),
 ) -> StyleList:
     """Enumerate every Discogs-400 style currently present in the
-    database."""
-    rows = db.list_styles(min_probability=style_min)
+    database. Use ``genre=`` to scope to one branch of the hierarchy."""
+    if genre is not None and "---" in genre:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "genre must not contain '---'",
+        )
+    rows = db.list_styles(min_probability=style_min, genre=genre)
     return StyleList(
         items=[StyleEnumeration(**r) for r in rows],
         total=len(rows),
