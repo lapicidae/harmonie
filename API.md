@@ -7,6 +7,32 @@ REST API for similarity queries, genre/style filtering, and playlist generation.
 * OpenAPI spec at `/openapi.json`; interactive docs at `/docs`.
 * Service installation, configuration, and operations: see [README.md](README.md).
 
+## Contents
+
+* [Conventions](#conventions)
+* [Authentication](#authentication)
+* [Filtering](#filtering)
+* [Track resolution](#track-resolution)
+* [Tracks](#tracks)
+    * [List tracks](#list-tracks) — `GET /api/v1/tracks`
+    * [Get a track](#get-a-track) — `GET /api/v1/tracks/{id}`
+    * [Find similar tracks](#find-similar-tracks) — `GET /api/v1/tracks/{id}/similar`
+    * [Resolve a track](#resolve-a-track) — `GET /api/v1/tracks/resolve`
+* [Genres and styles](#genres-and-styles)
+    * [List genres](#list-genres) — `GET /api/v1/genres`
+    * [List styles](#list-styles) — `GET /api/v1/styles`
+* [Playlists](#playlists) — `POST /api/v1/playlists`
+    * [Mode `similar`](#mode-similar--track-radio) — track radio
+    * [Mode `drift`](#mode-drift--chunked-walk) — chunked walk
+    * [Mode `vibe`](#mode-vibe--descriptor-driven) — descriptor-driven
+    * [Inline seed references](#inline-seed-references)
+* [Service](#service)
+    * [Service status](#service-status) — `GET /api/v1/status`
+    * [Scan state](#scan-state) — `GET /api/v1/scan`
+    * [Trigger scan](#trigger-scan) — `POST /api/v1/scan`
+    * [Liveness](#liveness) — `GET /health`
+* [Recipes](#recipes)
+
 ---
 
 ## Conventions
