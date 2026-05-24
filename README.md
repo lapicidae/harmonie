@@ -4,18 +4,13 @@
 [![Tests (Python 3.11)](https://github.com/mxschll/harmonie/actions/workflows/tests-py311.yml/badge.svg)](https://github.com/mxschll/harmonie/actions/workflows/tests-py311.yml)
 [![Lint](https://github.com/mxschll/harmonie/actions/workflows/lint.yml/badge.svg)](https://github.com/mxschll/harmonie/actions/workflows/lint.yml)
 
-Audio similarity service. Scans a music library, extracts a per-track embedding plus musical descriptors (BPM, key, loudness, danceability, onset rate), classifies each track against the 400 Discogs styles (House, Techno, Trap, Punk, ...), and reads file tags (artist, album, title, track number) using [Essentia](https://essentia.upf.edu/) and [mutagen](https://mutagen.readthedocs.io/). Everything is stored in SQLite and exposed via an HTTP API for similarity queries, style-filtered listings, and playlist generation.
-
-Built around Essentia's Discogs-Effnet model — a 1280-d embedding trained on Discogs tags that captures genre / style / sonic character.
-
-[Run it as a long-lived service](#running-as-a-service). It rescans on a schedule and serves any HTTP client that wants similarity queries against the indexed catalog.
+Audio similarity service. Scans a music library, extracts a per-track embedding plus musical descriptors (BPM, key, loudness, danceability, onset rate), classifies each track against [400 Discogs styles](https://essentia.upf.edu/models/classification-heads/genre_discogs400/genre_discogs400-discogs-effnet-1.json), and reads file tags (artist, album, title, track number) using [Essentia](https://essentia.upf.edu/) and [mutagen](https://mutagen.readthedocs.io/). Everything is stored in SQLite and exposed via an HTTP API for similarity queries, style-filtered listings, and playlist generation.
 
 ## Requirements
 
-* Linux or macOS
-* Python 3.9–3.12 (the upstream `essentia-tensorflow` wheels don't cover 3.13+ yet)
-* x86_64 CPU with AVX (essentially anything from the last decade) or Apple Silicon
-* `~1 GB` RAM per worker process during extraction; budget accordingly
+* Python 3.9 - 3.12 (the upstream `essentia-tensorflow` wheels don't cover 3.13+ yet)
+* x86_64 CPU (essentially anything from the last decade) or Apple Silicon
+* ~1 GB RAM per worker process during extraction; budget accordingly
 
 ## Contents
 
@@ -28,7 +23,7 @@ Built around Essentia's Discogs-Effnet model — a 1280-d embedding trained on D
 
 [pipx][pipx] puts harmonie in its own isolated virtualenv with the `harmonie` binary on your PATH. The `--pre` flag is needed because `essentia-tensorflow` is published as a `.dev` pre-release.
 
-If your system Python is 3.9–3.12:
+If your system Python is 3.9 - 3.12:
 
 ```bash
 sudo apt install pipx
@@ -36,10 +31,10 @@ pipx ensurepath
 pipx install --pip-args='--pre' 'git+https://github.com/mxschll/harmonie.git'
 ```
 
-If your system Python is 3.13+ (Ubuntu 24.10+, current Fedora, etc.), grab Python 3.12 via [uv][uv] and point pipx at it:
+If your system Python is 3.13+, grab Python 3.12 via [uv][uv] and point pipx at it:
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh   # one-time
+curl -LsSf https://astral.sh/uv/install.sh | sh
 uv python install 3.12
 pipx install --python "$(uv python find 3.12)" --pip-args='--pre' \
   'git+https://github.com/mxschll/harmonie.git'
@@ -55,7 +50,7 @@ Update with `pipx upgrade harmonie`.
 
 ### First scan
 
-On first start, harmonie scans your library. Effnet inference is about a second per track on a modern x86 core. Throughput scales roughly with `HARMONIE_WORKERS` until storage I/O becomes the bottleneck — expect 1–2 seconds per track on local SSDs with sane worker counts, 10×+ slower on network filesystems. A 50k-track library on a fast box takes around a day; the same library on a slow CPU or remote mount can take several. Subsequent scans are incremental: only files whose size or mtime changed get re-extracted.
+On first start, harmonie scans your library. Effnet inference is about a second per track on a modern x86 core. Throughput scales roughly with `HARMONIE_WORKERS` until storage I/O becomes the bottleneck. A 50k-track library on a fast box takes around a day. Subsequent scans are incremental: only files whose size or mtime changed get re-extracted.
 
 Watch progress and trigger another scan:
 
@@ -69,9 +64,7 @@ curl -X POST http://localhost:8842/api/v1/scan | json_pp
 
 ## API
 
-harmonie exposes an HTTP API under `/api/v1/` for similarity queries, style-filtered listings, and playlist generation. See [API.md](API.md) for the full reference: endpoints, filter syntax, style filtering, playlist modes, and end-to-end examples.
-
-`GET /health` is always public; if `HARMONIE_API_KEY` is set, all `/api/v1/` endpoints require `X-API-Key: <key>`.
+Harmonie exposes an HTTP API under `/api/v1/`. See [API.md](API.md) for the full reference.
 
 ## Configuration
 
@@ -124,11 +117,10 @@ Replace `<your-user>`, paths, and env vars with your own. Then:
 sudo systemctl daemon-reload
 sudo systemctl enable --now harmonie
 sudo systemctl status harmonie
-journalctl -u harmonie -f         # live logs
+journalctl -u harmonie -f
 ```
 
 After config changes, `sudo systemctl restart harmonie`.
-
 
 ## Development
 
