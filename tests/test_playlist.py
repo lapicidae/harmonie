@@ -172,11 +172,18 @@ class TestBoundedVariationPicker:
         assert len(picks) > 1
 
     def test_never_picks_outside_similarity_band(self):
-        # At maximum variation the service admits at most a 0.03 score
-        # drop. The 0.969 and 0.5 candidates must therefore never win.
-        scores = [1.0, 0.98, 0.969, 0.5]
+        # At maximum variation the service admits at most a 0.05 score
+        # drop. The 0.949 and 0.5 candidates must therefore never win.
+        scores = [1.0, 0.98, 0.949, 0.5]
         picks = {self._pick(scores, seed) for seed in range(100)}
         assert picks <= {0, 1}
+
+    def test_variation_uses_ease_out_mapping(self):
+        from harmonie.playlist import _variation_score_band
+
+        assert _variation_score_band(0.0) == 0.0
+        assert _variation_score_band(0.25) == 0.025
+        assert _variation_score_band(1.0) == 0.05
 
     def test_zero_variation_preserves_argmax(self):
         from harmonie.playlist import (

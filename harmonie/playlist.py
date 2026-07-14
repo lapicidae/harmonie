@@ -126,7 +126,18 @@ _COOLDOWN_STRENGTH = 0.2
 # score is close to the deterministic winner. Keeping this ceiling in the
 # service guarantees variation cannot turn a similarity playlist into an
 # unrelated shuffle.
-_MAX_VARIATION_SCORE_DROP = 0.03
+_MAX_VARIATION_SCORE_DROP = 0.05
+
+
+def _variation_score_band(variation: float) -> float:
+    """Map normalized variation to an ease-out similarity-score band.
+
+    Cosine-score gaps in smaller libraries are often large enough that a
+    linear mapping has only one eligible candidate through the lower half of
+    the setting. The square-root curve makes low and medium values useful,
+    while the hard maximum still bounds similarity loss.
+    """
+    return _MAX_VARIATION_SCORE_DROP * math.sqrt(variation)
 
 
 @dataclass(frozen=True)
@@ -334,7 +345,7 @@ def _pick_admissible(
         return -1
 
     best_score = max(score for _, score in admissible)
-    score_band = _MAX_VARIATION_SCORE_DROP * variation
+    score_band = _variation_score_band(variation)
     eligible = [
         (i, score) for i, score in admissible if score >= best_score - score_band
     ]
