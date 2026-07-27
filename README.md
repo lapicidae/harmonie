@@ -103,7 +103,7 @@ User=<your-user>
 WorkingDirectory=/home/<your-user>
 Environment=HARMONIE_LIBRARIES=/path/to/music
 Environment=HARMONIE_DATA_DIR=/home/<your-user>/.local/share/harmonie
-Environment=HARMONIE_WORKERS=6
+Environment=HARMONIE_WORKERS=2
 Environment=HARMONIE_PORT=8842
 ExecStart=/home/<your-user>/.local/bin/harmonie serve
 Restart=on-failure
