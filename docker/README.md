@@ -9,9 +9,9 @@ It offers optional NVIDIA CUDA hardware acceleration.
 
 - [Tech Stack & Base Image](#tech-stack--base-image)
 - [Quick Start](#quick-start)
-- [Docker Compose Deployment](#docker-compose-deployment)
 - [NVIDIA GPU Support (CUDA)](#nvidia-gpu-support-cuda)
 - [Configuration & Environment Variables](#configuration--environment-variables)
+- [Build the Image Locally](#build-the-image-locally)
 
 ---
 
@@ -25,27 +25,16 @@ It offers optional NVIDIA CUDA hardware acceleration.
 
 ## Quick Start
 
-### 1. Build the Image
+### Available Image Tags
 
-To build the image locally using the standard _CPU_ configuration:
+The following tag schemes are published on GHCR:
 
-```bash
-./build.sh
+| Variant | Latest Stable | Major   | Minor     | Patch / Release | Development (`main`) |
+| ------- | ------------- | ------- | --------- | --------------- | -------------------- |
+| **CPU** | `latest`      | `1`     | `1.2`     | `1.2.3`         | `devel`              |
+| **GPU** | `latest-gpu`  | `1-gpu` | `1.2-gpu` | `1.2.3-gpu`     | `devel-gpu`          |
 
-# or alternatively
-docker build -t harmonie:latest .
-```
-
-To use the _GPU_ features, build with the `-gpu` tag:
-
-```bash
-BASE_TAG=latest-gpu ./build.sh
-
-# or alternatively
-docker build --build-arg BASE_TAG=latest-gpu -t harmonie:latest-gpu .
-```
-
-### 2. Run with Docker CLI
+### Run with Docker CLI
 
 ```bash
 docker run -d \
@@ -55,12 +44,10 @@ docker run -d \
   -p 8842:8842 \
   -v /path/to/your/music:/music:ro \
   -v /path/to/your/data:/data \
-  harmonie:latest
+  ghcr.io/mxschll/harmonie:latest
 ```
 
----
-
-## Docker Compose Deployment
+### Docker Compose Deployment
 
 The recommended way to deploy harmonie alongside services like Jellyfin or Traefik is via Docker Compose.
 
@@ -68,11 +55,7 @@ The recommended way to deploy harmonie alongside services like Jellyfin or Traef
 services:
   harmonie:
     container_name: harmonie
-    build:
-      context: https://github.com/mxschll/harmonie.git#main:docker
-      dockerfile: Dockerfile
-      args:
-        BASE_TAG: latest  # Toggle to 'latest-gpu' for GPU support
+    image: ghcr.io/mxschll/harmonie:latest # Toggle to 'latest-gpu' for GPU support
     restart: unless-stopped
     ports:
       - "8842:8842"
@@ -96,7 +79,7 @@ services:
 To spin up the container, run:
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
 ---
@@ -126,6 +109,28 @@ All underlying application settings, database storage locations, and analytical 
 
 > 📘 **Detailed Configuration Reference**  
 > For a comprehensive list of all application settings (e.g., `HARMONIE_WORKERS`, `HARMONIE_SCAN_INTERVAL_HOURS`, CORS origins, and API keys), please refer to the **[harmonie README](../README.md#configuration)**.
-> 
+>
 > 💡 **Docker Defaults:**  
 > Variables such as `HARMONIE_LIBRARIES`, `HARMONIE_DATA_DIR`, and `HARMONIE_PORT` come pre-configured with recommended defaults and usually do not need to be modified.
+
+---
+
+## Build the Image Locally
+
+To build the image locally using the standard _CPU_ configuration:
+
+```bash
+./build.sh
+
+# or alternatively
+docker build -t harmonie:latest .
+```
+
+To use the _GPU_ features, build with the `-gpu` tag:
+
+```bash
+BASE_TAG=latest-gpu ./build.sh
+
+# or alternatively
+docker build --build-arg BASE_TAG=latest-gpu -t harmonie:latest-gpu .
+```

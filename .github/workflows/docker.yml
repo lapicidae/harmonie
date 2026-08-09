@@ -1,0 +1,208 @@
+# ==============================================================================
+# Publish Docker Image to GitHub Container Registry (GHCR)
+# ==============================================================================
+# Triggers:
+#   - Automatically on push of Git tags matching 'v*' (e.g., v1.4.0).
+#   - Manually via workflow_dispatch with custom git reference and image variant.
+#
+# Default Behavior (workflow_dispatch with empty git_ref):
+#   - Defaults to checking out 'main' and pushes with the 'devel' / 'devel-gpu' tags.
+#
+# Tagging Scheme:
+#   - Latest Git Tag (e.g., v1.4.0):
+#       CPU -> 1.4.0, 1.4, 1, latest
+#       GPU -> 1.4.0-gpu, 1.4-gpu, 1-gpu, latest-gpu
+#   - Older Git Tag (e.g., v1.0.0):
+#       CPU -> 1.0.0, 1.0, 1
+#       GPU -> 1.0.0-gpu, 1.0-gpu, 1-gpu
+#   - Main Branch ('main'):
+#       CPU -> devel
+#       GPU -> devel-gpu
+#   - Any Other Branch (e.g., 'docker', 'feature-x'):
+#       CPU -> <branch_name> (e.g., docker)
+#       GPU -> <branch_name>-gpu (e.g., docker-gpu)
+# ==============================================================================
+
+name: Publish Docker image
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: 'Git Tag or Branch to checkout and build (e.g. v1.0.0, main, or docker)'
+        required: false
+        default: ''
+      variant:
+        description: 'Choose Docker image variant to build and push'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - cpu
+          - gpu
+
+jobs:
+  push_to_registries:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+
+    steps:
+      - name: Actions Checkout Setup
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve Git Reference
+        id: resolve-ref
+        run: |
+          git fetch --tags origin
+          LATEST_TAG=$(git tag -l "v*" --sort=-v:refname | head -n 1)
+
+          if [ -n "${{ inputs.git_ref }}" ]; then
+            INPUT_REF="${{ inputs.git_ref }}"
+
+            if git rev-parse --verify "refs/tags/$INPUT_REF" >/dev/null 2>&1; then
+              RESOLVED_REF="$INPUT_REF"
+            elif git rev-parse --verify "refs/tags/v$INPUT_REF" >/dev/null 2>&1; then
+              RESOLVED_REF="v$INPUT_REF"
+            else
+              RESOLVED_REF="$INPUT_REF"
+            fi
+
+            CLEAN_INPUT=$(echo "$RESOLVED_REF" | sed 's/^v//')
+            CLEAN_LATEST=$(echo "$LATEST_TAG" | sed 's/^v//')
+
+            printf "Using explicitly provided git ref: %s\n" "$RESOLVED_REF"
+            printf "ref=%s\n" "$RESOLVED_REF" >> "$GITHUB_OUTPUT"
+
+            if [ -n "$CLEAN_LATEST" ] && [ "$CLEAN_INPUT" = "$CLEAN_LATEST" ]; then
+              printf "is_latest_tag=true\n" >> "$GITHUB_OUTPUT"
+            else
+              printf "is_latest_tag=false\n" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            printf "No ref provided. Defaulting to 'main' branch.\n"
+            printf "ref=main\n" >> "$GITHUB_OUTPUT"
+            printf "is_latest_tag=false\n" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out selected release
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.resolve-ref.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Inject Docker context from main if missing
+        run: |
+          if [ ! -f "docker/Dockerfile" ] && [ ! -f "Dockerfile" ]; then
+            printf "No Dockerfile found in checked out ref. Injecting 'docker/' directory from main...\n"
+            git fetch origin main
+            git checkout origin/main -- docker/
+          fi
+
+      - name: Detect Dockerfile path
+        id: docker-path
+        run: |
+          if [ -f "docker/Dockerfile" ]; then
+            printf "context=./docker\n" >> "$GITHUB_OUTPUT"
+            printf "file=docker/Dockerfile\n" >> "$GITHUB_OUTPUT"
+          elif [ -f "Dockerfile" ]; then
+            printf "context=.\n" >> "$GITHUB_OUTPUT"
+            printf "file=Dockerfile\n" >> "$GITHUB_OUTPUT"
+          else
+            printf "Error: Dockerfile could not be found or injected.\n" >&2
+            exit 1
+          fi
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # --- CPU BUILD ---
+      - name: Extract metadata for CPU
+        if: ${{ github.event_name == 'push' || inputs.variant == 'both' || inputs.variant == 'cpu' }}
+        id: meta-cpu
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          context: git
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=latest,enable=${{ steps.resolve-ref.outputs.is_latest_tag == 'true' }}
+            type=raw,value=devel,enable=${{ steps.resolve-ref.outputs.ref == 'main' }}
+            type=raw,value=${{ steps.resolve-ref.outputs.ref }},enable=${{ steps.resolve-ref.outputs.is_latest_tag == 'false' && steps.resolve-ref.outputs.ref != 'main' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+      - name: Get CPU Base Image Digest
+        if: ${{ github.event_name == 'push' || inputs.variant == 'both' || inputs.variant == 'cpu' }}
+        id: base-digest-cpu
+        run: |
+          DIGEST=$(docker manifest inspect tensorflow/tensorflow:latest -v 2>/dev/null | grep -m1 '"digest"' | cut -d '"' -f 4 || true)
+          printf "digest=%s\n" "$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push CPU image
+        if: ${{ github.event_name == 'push' || inputs.variant == 'both' || inputs.variant == 'cpu' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ steps.docker-path.outputs.context }}
+          file: ${{ steps.docker-path.outputs.file }}
+          push: true
+          build-args: |
+            BASE_TAG=latest
+            BASE_IMAGE_DIGEST=${{ steps.base-digest-cpu.outputs.digest }}
+          tags: ${{ steps.meta-cpu.outputs.tags }}
+          labels: ${{ steps.meta-cpu.outputs.labels }}
+
+      # --- GPU BUILD ---
+      - name: Extract metadata for GPU
+        if: ${{ github.event_name == 'push' || inputs.variant == 'both' || inputs.variant == 'gpu' }}
+        id: meta-gpu
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          context: git
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=latest-gpu,enable=${{ steps.resolve-ref.outputs.is_latest_tag == 'true' }}
+            type=raw,value=devel-gpu,enable=${{ steps.resolve-ref.outputs.ref == 'main' }}
+            type=raw,value=${{ steps.resolve-ref.outputs.ref }}-gpu,enable=${{ steps.resolve-ref.outputs.is_latest_tag == 'false' && steps.resolve-ref.outputs.ref != 'main' }}
+            type=semver,pattern={{version}}-gpu
+            type=semver,pattern={{major}}.{{minor}}-gpu
+            type=semver,pattern={{major}}-gpu
+
+      - name: Get GPU Base Image Digest
+        if: ${{ github.event_name == 'push' || inputs.variant == 'both' || inputs.variant == 'gpu' }}
+        id: base-digest-gpu
+        run: |
+          DIGEST=$(docker manifest inspect tensorflow/tensorflow:latest-gpu -v 2>/dev/null | grep -m1 '"digest"' | cut -d '"' -f 4 || true)
+          printf "digest=%s\n" "$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push GPU image
+        if: ${{ github.event_name == 'push' || inputs.variant == 'both' || inputs.variant == 'gpu' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ steps.docker-path.outputs.context }}
+          file: ${{ steps.docker-path.outputs.file }}
+          push: true
+          build-args: |
+            BASE_TAG=latest-gpu
+            BASE_IMAGE_DIGEST=${{ steps.base-digest-gpu.outputs.digest }}
+          tags: ${{ steps.meta-gpu.outputs.tags }}
+          labels: ${{ steps.meta-gpu.outputs.labels }}
